@@ -7,6 +7,7 @@ import contextlib
 import os
 import sqlite3
 import threading
+import time
 import uuid
 from collections.abc import Iterator
 from typing import Any
@@ -45,6 +46,9 @@ class EventLog:
             "CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, body TEXT NOT NULL)"
         )
         self._db.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v INTEGER NOT NULL)")
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS nonces (nonce TEXT PRIMARY KEY, expires REAL NOT NULL)"
+        )
         self._pending: list[Event] = []
         self.dropped = 0
         reserved = self._meta("seq_reserved")
@@ -188,6 +192,24 @@ class EventLog:
     def _count_after(self, seq: int) -> int:
         n: int = self._db.execute("SELECT COUNT(*) FROM events WHERE seq > ?", (seq,)).fetchone()[0]
         return n + len(self._pending)
+
+    def first_use(self, nonce: str, expires: float) -> bool:
+        """Record a command's nonce; False if it has been used before. Kept on
+        disk, so a restart can't be used to replay a command."""
+        with self._lock:
+            # Kept a month, not until expiry: a clock stepped back must not
+            # make an old command look new.
+            self._db.execute("DELETE FROM nonces WHERE expires < ?", (time.time() - 30 * 86400,))
+            # FULL, like the seq reservation: a power cut must not undo this,
+            # or the hub's resend would run the command a second time.
+            self._db.execute("PRAGMA synchronous=FULL")
+            try:
+                cur = self._db.execute(
+                    "INSERT OR IGNORE INTO nonces (nonce, expires) VALUES (?, ?)", (nonce, expires)
+                )
+            finally:
+                self._db.execute("PRAGMA synchronous=NORMAL")
+            return cur.rowcount == 1
 
     def close(self) -> None:
         self.flush()

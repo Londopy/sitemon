@@ -18,22 +18,44 @@ import aiohttp
 from aiohttp import web
 
 from .. import __version__
-from .._events import Event, SigningKey, canonical_json, envelope_body
+from .._commands import Command
+from .._events import Event, PublicKey, SigningKey, canonical_json, envelope_body
 from .._systemd import notify, watchdog_interval
 from ..config import AgentConfig
 from . import aredn
 from .ami import AmiClient, AmiError
+from .announce import AnnounceError, Announcer
+from .relays import KeepAlive, Output, RelayBank, RelayError, gpio_output
 from .sensors.base import Sensor, SensorError
 from .store import EventLog
 
 log = logging.getLogger("sitemon.agent")
 
+MAX_COMMANDS = 20
 # One glitch at a transmitter site is normal; three in a row is a fault.
 FAULT_AFTER = 3
 # Quiet inputs are re-sent this often so nobody wonders whether they're stale.
 STATE_REFRESH = 300.0
+# Before this the Pi's clock was never set (no RTC, no NTP yet).
+SANE_CLOCK = 1_577_836_800.0  # 2020-01-01
 # Change on every poll, so they don't count as a state change.
 VOLATILE = {"uptime_s", "uptime", "load1"}
+
+
+def _seconds(v: Any) -> float | None:
+    """A command's optional ``seconds`` as a float; RelayBank checks its range."""
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise RelayError("seconds must be a number")
+    try:
+        return float(v)
+    except OverflowError as e:
+        raise RelayError("seconds is out of range") from e
+
+
+def _is_fast(s: Sensor) -> bool:
+    return s.kind == "reading" and getattr(s, "fast", False) is True
 
 
 def sign_envelope(key: SigningKey, env: dict[str, Any]) -> str:
@@ -127,6 +149,7 @@ class Agent:
         *,
         db_path: str | None = None,
         ami: AmiClient | None = None,
+        output: Callable[[int, bool], Output] = gpio_output,
     ) -> None:
         self.cfg = cfg
         self.key = key
@@ -142,7 +165,30 @@ class Agent:
         self.hubs = {url: HubSync(url) for url in self.log.hubs}
         self.ami = ami
         if ami is None and cfg.ami is not None:
-            self.ami = AmiClient(cfg.ami.host, cfg.ami.port, cfg.ami.user, cfg.ami.secret)
+            self.ami = AmiClient(
+                cfg.ami.host,
+                cfg.ami.port,
+                cfg.ami.user,
+                cfg.ami.secret,
+                sound_dir=self._sound_dir() if cfg.announce else None,
+            )
+        control = cfg.control
+        self.control_hubs = set(control.hubs) if control else set()
+        self.operator_keys = [PublicKey.from_b64(k) for k in control.operators] if control else []
+        self.hub_keys = [PublicKey.from_b64(k) for k in control.hub_keys] if control else []
+        self.relays = RelayBank(cfg.relays, output) if cfg.relays else None
+        self.keepalive = (
+            KeepAlive(control.watchdog_pin, output)
+            if control and control.watchdog_pin is not None
+            else None
+        )
+        self.announcer = (
+            Announcer(cfg.announce, self.ami, cfg.ami.node, self._sound_dir())
+            if cfg.announce and self.ami is not None and cfg.ami is not None
+            else None
+        )
+        self._fast_recorded: dict[str, float] = {}
+        self.clock: Callable[[], float] = time.monotonic
         self.states = StateTracker()
         self.switches = Debouncer(cfg.switch_debounce)
         self.latest: dict[str, dict[str, Any]] = {}
@@ -153,6 +199,9 @@ class Agent:
         self.last_sample = time.monotonic()
         self._stop = asyncio.Event()
         self._session: aiohttp.ClientSession | None = None
+
+    def _sound_dir(self) -> str:
+        return os.path.abspath(os.path.join(self.cfg.data_dir, "announce"))
 
     @property
     def last_sync_ok(self) -> float | None:
@@ -210,8 +259,10 @@ class Agent:
 
     async def sample_once(self) -> None:
         for s in self.sensors:
+            if _is_fast(s):
+                continue
             values = await self.read_sensor(s)
-            if values is None:
+            if not values:
                 continue
             if s.kind == "reading":
                 self.record("reading", s.name, values)
@@ -219,13 +270,123 @@ class Agent:
                 self._record_state(s, values)
         self.last_sample = time.monotonic()
 
-    async def switches_once(self) -> None:
-        # A fast loop of their own, so a door opened and shut between samples is seen.
+    async def fast_once(self) -> None:
+        """The 1 s sensor loop: switches, and sensors that only have something to
+        say briefly (RF while transmitting)."""
+        now = self.clock()
         for s in self.sensors:
             if s.kind == "state":
                 values = await self.read_sensor(s)
                 if values is not None:
                     self._record_state(s, values)
+            elif _is_fast(s):
+                last = self._fast_recorded.get(s.name)
+                if last is not None and now - last < self.cfg.sample_interval:
+                    continue
+                values = await self.read_sensor(s)
+                if values:
+                    self.record("reading", s.name, values)
+                    self._fast_recorded[s.name] = now
+
+    def relays_once(self) -> None:
+        """Relay time limits and the keep-alive pin, in a loop of their own so
+        a slow sensor read can never hold a relay on past its limit."""
+        if self.relays is not None and self.relays.tick():
+            self._send_state("relay", self.relays.states())
+        if self.keepalive is not None and self._healthy():
+            self.keepalive.toggle()
+
+    def _power_down(self, close: bool = False) -> None:
+        """Switch every relay off (and with ``close``, release the pins)."""
+        steps = []
+        if self.relays is not None:
+            steps.append(self.relays.close if close else self.relays.off_all)
+        if close and self.keepalive is not None:
+            steps.append(self.keepalive.close)
+        for step in steps:
+            try:
+                step()
+            # Each step tries every relay; shutdown carries on either way, and
+            # the hardware cutoff takes over once the keep-alive stops.
+            except Exception as e:
+                log.error("could not switch every relay off: %s", e)
+
+    def _healthy(self) -> bool:
+        return time.monotonic() - self.last_sample < max(3 * self.cfg.sample_interval, 60)
+
+    async def poll_commands(self, hub: HubSync) -> int:
+        """Collect and run commands from a control hub; returns how many arrived."""
+        env = self._envelope([])
+        url = hub.url.rstrip("/") + "/api/commands/poll"
+        try:
+            async with self._http().post(
+                url, json=env, timeout=aiohttp.ClientTimeout(total=30)
+            ) as r:
+                if r.status != 200:
+                    raise SyncError(f"HTTP {r.status} {(await r.text())[:200]}")
+                body = await r.json()
+        except (
+            aiohttp.ClientError,
+            asyncio.TimeoutError,
+            ValueError,
+            RecursionError,
+            SyncError,
+        ) as e:
+            log.info("command poll to %s failed: %s", hub.url, e)
+            return 0
+        raw = body.get("commands") if isinstance(body, dict) else None
+        # Bounded, so a misbehaving hub can't flood the log with refusals.
+        items = raw[:MAX_COMMANDS] if isinstance(raw, list) else []
+        for item in items:
+            await self.handle_command(item)
+        return len(items)
+
+    async def handle_command(self, raw: Any) -> None:
+        try:
+            cmd = Command.from_dict(raw)
+        except ValueError as e:
+            log.warning("ignored a malformed command: %s", e)
+            return
+        refused = "the agent is stopping" if self._stop.is_set() else self._refuse(cmd)
+        if refused is None and not self.log.first_use(cmd.nonce, cmd.expires):
+            return  # already handled: the hub resends until it hears back
+        ok, detail = (False, refused) if refused else await self._run_command(cmd)
+        log.warning("command %s %s: %s", cmd.kind, "done" if ok else "refused", detail)
+        self.record(
+            "command", "control", {"nonce": cmd.nonce, "kind": cmd.kind, "ok": ok, "detail": detail}
+        )
+
+    def _refuse(self, cmd: Command) -> str | None:
+        if cmd.site != self.cfg.site:
+            return f"for site {cmd.site[:40]!r}, not this one"
+        keys = self.operator_keys if cmd.kind == "relay" else self.hub_keys
+        if cmd.signer(keys) is None:
+            return "not signed by a key this site accepts"
+        now = time.time()
+        # Expiry means nothing on a clock that was never set.
+        if now < SANE_CLOCK:
+            return "this site's clock isn't set"
+        return cmd.problem(now)
+
+    async def _run_command(self, cmd: Command) -> tuple[bool, str]:
+        try:
+            if cmd.kind == "relay":
+                if self.relays is None:
+                    return False, "this site has no relays"
+                relay, action = cmd.args.get("relay"), cmd.args.get("action")
+                if not isinstance(relay, str) or not isinstance(action, str):
+                    return False, "relay and action must be names"
+                detail = self.relays.run(relay, action, _seconds(cmd.args.get("seconds")))
+                self._send_state("relay", self.relays.states())
+                return True, detail
+            if self.announcer is None:
+                return False, "announcements are off at this site"
+            text = cmd.args.get("text")
+            if not isinstance(text, str):
+                return False, "text must be a string"
+            return True, await self.announcer.say(text, cmd.nonce)
+        except (RelayError, AnnounceError) as e:
+            return False, str(e)
 
     async def ami_once(self) -> None:
         assert self.ami is not None
@@ -341,7 +502,7 @@ class Agent:
                 if r.status != 200:
                     raise SyncError(f"HTTP {r.status} {(await r.text())[:200]}")
                 return _acked_through(await r.json())
-        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, RecursionError) as e:
             raise SyncError(str(e) or type(e).__name__) from e
 
     async def _every(self, interval: float, fn: Callable[[], Any]) -> None:
@@ -365,6 +526,10 @@ class Agent:
             except sqlite3.Error as e:
                 log.error("event log error: %s", e)
                 ok = False
+            # Results go straight back, so whoever sent the command sees them now.
+            if ok and hub.url in self.control_hubs and await self.poll_commands(hub):
+                self.log.flush()
+                await self.sync_hub(hub)
             # Back off up to 5 minutes while this hub's path is down, so a
             # dead link doesn't keep a cellular modem busy.
             delay = self.cfg.sync_interval if ok else min(delay * 2, 300.0)
@@ -381,6 +546,7 @@ class Agent:
 
     def stop(self) -> None:
         self._stop.set()
+        self._power_down()
 
     def _loops(self) -> list[Coroutine[Any, Any, None]]:
         loops = [
@@ -389,8 +555,10 @@ class Agent:
             self._every(self.cfg.flush_interval, self.log.flush),
             *(self._sync_loop(h) for h in self.hubs.values()),
         ]
-        if any(s.kind == "state" for s in self.sensors):
-            loops.append(self._every(self.cfg.switch_interval, self.switches_once))
+        if any(s.kind == "state" or _is_fast(s) for s in self.sensors):
+            loops.append(self._every(self.cfg.switch_interval, self.fast_once))
+        if self.relays is not None or self.keepalive is not None:
+            loops.append(self._every(1.0, self.relays_once))
         if self.ami is not None and self.cfg.ami is not None:
             loops.append(self._every(self.cfg.ami.interval, self.ami_once))
         if self.cfg.aredn is not None:
@@ -400,6 +568,8 @@ class Agent:
         return loops
 
     async def run(self) -> None:
+        if self.relays is not None:
+            self._send_state("relay", self.relays.states())  # all off after a restart
         tasks = [asyncio.create_task(c) for c in self._loops()]
         runner = await self._start_local_ui() if self.cfg.local_ui else None
         notify("READY=1")
@@ -412,6 +582,8 @@ class Agent:
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            # Relays before anything that can wait on the network.
+            self._power_down(close=True)
             if runner is not None:
                 await runner.cleanup()
             if self.ami is not None:

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fnmatch
 import csv
 import io
+import json
 import logging
 import math
 import re
@@ -20,12 +22,13 @@ import aiohttp
 from aiohttp import web
 
 from .. import __version__
-from .._events import PublicKey
+from .._commands import Command, speakable
+from .._events import PublicKey, SigningKey
 from .._systemd import notify, watchdog_interval
 from ..config import ChannelConfig, ConfigError, HubConfig, RuleConfig, SiteConfig
-from . import alerts, channels, rules
+from . import alerts, channels, commands, rules
 from .db import HubDB
-from .ingest import IngestError, IngestResult, ingest
+from .ingest import IngestError, IngestResult, check_envelope, ingest
 from .summary import weekly_summary
 
 log = logging.getLogger("sitemon.hub")
@@ -40,6 +43,8 @@ class Hub:
         self.db = db or HubDB(cfg.db_path)
         self.sites: dict[str, SiteConfig] = {s.id: s for s in cfg.sites}
         self.keys = load_keys(cfg)
+        self.signing_key = SigningKey.load(cfg.key_path) if cfg.key_path else None
+        self.operators = [(op, PublicKey.from_b64(op.key)) for op in cfg.operators]
         # Silence counts from the later of these, so neither a hub outage nor
         # a newly added site looks like a dead site.
         self.process_started = time.time()
@@ -62,7 +67,28 @@ class Hub:
         findings = rules.evaluate_site(
             self.cfg, self.db, site, now, watch_from, self.bad_uploads.get(site_id)
         )
-        return alerts.apply(self.db, self.cfg, site, findings, now)
+        notices = alerts.apply(self.db, self.cfg, site, findings, now)
+        self._announce(site, notices, now)
+        return notices
+
+    def _announce(self, site: SiteConfig, notices: list[alerts.Notice], now: float) -> None:
+        """Queue a spoken alert for the first new critical problem on a rule
+        marked announce, at most one per site per ``announce_gap``."""
+        if self.signing_key is None:
+            return
+        announce = {f"rule:{r.name}" for r in self.cfg.rules if r.announce}
+        for n in notices:
+            if n.severity != "critical" or n.event not in ("open", "escalate"):
+                continue
+            if n.rule not in announce:
+                continue
+            last = commands.last_announcement(self.db, site.id)
+            if last is not None and now - last < self.cfg.announce_gap:
+                return
+            text = speakable(f"{site.name}. {n.message}")
+            cmd = Command.create(site.id, "announce", {"text": text}, lifetime=600, now=now)
+            commands.queue(self.db, cmd.signed(self.signing_key), now)
+            return
 
     def evaluate_all(self, now: float | None = None) -> list[alerts.Notice]:
         out: list[alerts.Notice] = []
@@ -144,11 +170,12 @@ class Hub:
         # the batch ahead of healthy channels.
         rows = self.db.q(
             "SELECT * FROM outbox o WHERE done IS NULL AND next_try <= ? AND NOT EXISTS "
-            "(SELECT 1 FROM outbox p WHERE p.channel = o.channel AND p.done IS NULL "
+            "(SELECT 1 FROM outbox p WHERE p.channel = o.channel AND p.target = o.target "
+            "AND p.done IS NULL "
             "AND p.id < o.id AND p.next_try > ?) ORDER BY id LIMIT 200",
             (now, now),
         )
-        queues: dict[str, list[Any]] = {}
+        queues: dict[tuple[str, str], list[Any]] = {}
         for r in rows:
             if r["channel"] not in by_name:
                 self.db.x(
@@ -156,9 +183,9 @@ class Hub:
                     (now, r["id"]),
                 )
                 continue
-            queues.setdefault(r["channel"], []).append(r)
+            queues.setdefault((r["channel"], r["target"]), []).append(r)
         results = await asyncio.gather(
-            *(self._send_rows(by_name[name], q, now) for name, q in queues.items()),
+            *(self._send_rows(by_name[name], q, now) for (name, _), q in queues.items()),
             return_exceptions=True,
         )
         for res in results:
@@ -174,7 +201,7 @@ class Hub:
             if age > 600:
                 body = f"{body}\n(delayed {int(age // 60)} min: the hub could not send it sooner)"
             try:
-                await channels.send(self.http(), ch, r["title"], body, r["severity"])
+                await channels.send(self.http(), ch, r["title"], body, r["severity"], r["target"])
             except channels.ChannelError as e:
                 tries = r["tries"] + 1
                 if e.permanent or age > GIVE_UP_AFTER:
@@ -274,6 +301,9 @@ class Hub:
         # A site back from a long outage sends 500-event batches, far below this.
         app = web.Application(client_max_size=8 * 1024 * 1024)
         app.router.add_post("/api/ingest", self.h_ingest)
+        app.router.add_post("/api/commands", self.h_command)
+        app.router.add_post("/api/commands/poll", self.h_poll)
+        app.router.add_get("/api/commands/{nonce}", self.h_command_status)
         app.router.add_get("/api/groups", self.h_groups)
         app.router.add_get("/api/group/{group}", self.h_group)
         app.router.add_get("/api/site/{site}", self.h_site)
@@ -293,7 +323,7 @@ class Hub:
     async def h_ingest(self, req: web.Request) -> web.Response:
         try:
             env = await req.json()
-        except ValueError:
+        except (ValueError, RecursionError):
             return web.json_response({"error": "not JSON"}, status=400)
         try:
             res = ingest(self.db, self.keys, env)
@@ -316,6 +346,56 @@ class Hub:
                 "quarantined": len(res.quarantined),
             }
         )
+
+    async def h_command(self, req: web.Request) -> web.Response:
+        """Queue a relay command, signed by an operator allowed for its site."""
+        try:
+            cmd = Command.from_dict(await _small_json(req))
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        if cmd.kind != "relay":
+            return web.json_response({"error": "only relay commands are accepted"}, status=403)
+        if cmd.site not in self.sites:
+            return web.json_response({"error": f"unknown site {cmd.site!r}"}, status=404)
+        allowed = [
+            key
+            for op, key in self.operators
+            if any(fnmatch.fnmatchcase(cmd.site, pat) for pat in op.sites)
+        ]
+        if cmd.signer(allowed) is None:
+            return web.json_response(
+                {"error": "not signed by an operator allowed for this site"}, status=403
+            )
+        try:
+            commands.queue(self.db, cmd, time.time())
+        except commands.CommandError as e:
+            return web.json_response({"error": str(e)}, status=e.status)
+        log.info("queued %s command for %s", cmd.args.get("action"), cmd.site)
+        return web.json_response({"nonce": cmd.nonce}, status=202)
+
+    async def h_poll(self, req: web.Request) -> web.Response:
+        """A site collecting its commands; the request is signed like an upload."""
+        try:
+            body = check_envelope(self.keys, await _small_json(req))
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        except IngestError as e:
+            return web.json_response({"error": str(e)}, status=e.status)
+        # A captured poll must not fetch commands again later.
+        site, boot, mono = str(body["site"]), str(body["boot"]), int(body["mono_ns"])
+        last = self.db.get_meta(f"poll:{site}")
+        if last is not None:
+            last_boot, _, last_mono = last.partition(" ")
+            if last_boot == boot and mono <= int(last_mono):
+                return web.json_response({"error": "an old poll, sent again"}, status=409)
+        self.db.set_meta(f"poll:{site}", f"{boot} {mono}")
+        return web.json_response({"commands": commands.collect(self.db, site, time.time())})
+
+    async def h_command_status(self, req: web.Request) -> web.Response:
+        st = commands.status(self.db, req.match_info["nonce"])
+        if st is None:
+            raise web.HTTPNotFound(text="no such command")
+        return web.json_response(st)
 
     async def h_health(self, _: web.Request) -> web.Response:
         return web.json_response({"ok": True, "version": __version__})
@@ -391,6 +471,7 @@ class Hub:
             for a in self.db.alerts_since(now - 30 * 86400)
             if a.site == site.id
         ][-50:]
+        out["commands"] = commands.recent(self.db, site.id)
         return web.json_response(out)
 
     def _range(self, req: web.Request) -> tuple[str, str, float, float]:
@@ -472,6 +553,18 @@ def _as_state(rule: RuleConfig, value: float) -> Any:
     """A stored point back as the value a state rule compares (points hold
     true/false as 1/0)."""
     return bool(value) if isinstance(rule.bad, bool) else value
+
+
+async def _small_json(req: web.Request, limit: int = 16384) -> Any:
+    """A request body that must be small: commands and polls are a few hundred
+    bytes, and are parsed before anyone's signature can be checked."""
+    data = await req.content.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError("request too large")
+    try:
+        return json.loads(data)
+    except RecursionError as e:
+        raise ValueError("not JSON") from e
 
 
 def _hhmm(t: float) -> str:

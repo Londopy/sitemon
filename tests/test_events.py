@@ -54,7 +54,7 @@ def test_type_changes_are_rejected(key: SigningKey) -> None:
 
 def test_unknown_kind_rejected(key: SigningKey) -> None:
     with pytest.raises(ValueError):
-        ev(key, kind="command")
+        ev(key, kind="relay")
 
 
 def test_key_round_trips(key: SigningKey) -> None:

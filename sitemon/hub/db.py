@@ -46,7 +46,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS alerts_open ON alerts (site, rule) WHERE resol
 CREATE TABLE IF NOT EXISTS outbox (
     id INTEGER PRIMARY KEY, channel TEXT NOT NULL, created REAL NOT NULL, next_try REAL NOT NULL,
     tries INTEGER NOT NULL DEFAULT 0, severity TEXT NOT NULL, title TEXT NOT NULL,
-    body TEXT NOT NULL, done REAL, last_error TEXT
+    body TEXT NOT NULL, done REAL, last_error TEXT, target TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS outbox_pending ON outbox (done, next_try);
 CREATE TABLE IF NOT EXISTS rejected (
@@ -56,6 +56,12 @@ CREATE TABLE IF NOT EXISTS rejected (
 CREATE INDEX IF NOT EXISTS rejected_recv ON rejected (site, recv);
 CREATE UNIQUE INDEX IF NOT EXISTS rejected_once ON rejected (site, digest);
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS commands (
+    nonce TEXT PRIMARY KEY, site TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL,
+    created REAL NOT NULL, expires REAL NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL,
+    updated REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS commands_site ON commands (site, status);
 """
 
 
@@ -83,6 +89,10 @@ class HubDB:
         # data for good. One fsync per upload is cheap at this volume.
         self._db.execute("PRAGMA synchronous=FULL")
         self._db.executescript(SCHEMA)
+        # Hubs created by 0.1.0 have an outbox without the per-recipient column.
+        cols = {r[1] for r in self._db.execute("PRAGMA table_info(outbox)")}
+        if "target" not in cols:
+            self._db.execute("ALTER TABLE outbox ADD COLUMN target TEXT NOT NULL DEFAULT ''")
         self.lock = threading.RLock()
 
     @contextmanager
@@ -260,6 +270,7 @@ class HubDB:
             ("alerts", "resolved IS NOT NULL AND resolved < ?"),
             ("outbox", "done IS NOT NULL AND done < ?"),
             ("rejected", "recv < ?"),
+            ("commands", "created < ?"),
         ]
         total = 0
         for table, where in targets:

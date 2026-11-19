@@ -62,7 +62,7 @@ def test_secret_from_file(tmp_path: Path) -> None:
         ('[[sites]]\nid="a"\n', "key"),
         ('[[sites]]\nid="a"\nkey="k"\ngroup="nope"\n', "not listed"),
         ('[heartbeat]\nwarn_after="10m"\ncritical_after="5m"\n', "critical_after"),
-        ('[[channels]]\ntype="sms"\n', "type must be"),
+        ('[[channels]]\ntype="pager"\n', "type must be"),
     ],
 )
 def test_hub_config_errors(tmp_path: Path, bad: str, msg: str) -> None:
