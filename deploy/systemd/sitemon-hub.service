@@ -1,0 +1,27 @@
+[Unit]
+Description=sitemon hub
+Documentation=https://github.com/Londopy/sitemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=sitemon
+Group=sitemon
+ExecStart=/opt/sitemon/bin/sitemon hub --config /etc/sitemon/hub.toml
+# SITEMON_DISCORD_WEBHOOK and friends live here, not in hub.toml.
+EnvironmentFile=-/etc/sitemon/hub.env
+StateDirectory=sitemon
+Restart=always
+RestartSec=5
+WatchdogSec=120
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ReadWritePaths=/var/lib/sitemon
+
+[Install]
+WantedBy=multi-user.target

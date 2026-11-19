@@ -1,0 +1,35 @@
+[Unit]
+Description=sitemon site agent
+Documentation=https://github.com/Londopy/sitemon
+# Start after Asterisk so the first AMI poll usually succeeds; the agent copes
+# either way, it just reports AMI down until Asterisk answers.
+After=network-online.target asterisk.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=sitemon
+Group=sitemon
+# i2c and gpio groups give access to /dev/i2c-* and /dev/gpiochip* without root.
+SupplementaryGroups=i2c gpio
+ExecStart=/opt/sitemon/bin/sitemon agent --config /etc/sitemon/agent.toml
+# SITEMON_AMI_SECRET lives here, readable only by root and the service.
+EnvironmentFile=-/etc/sitemon/agent.env
+StateDirectory=sitemon
+Restart=always
+RestartSec=10
+# The agent pings only while sampling is making progress; if it wedges (a hung
+# I2C read, a deadlock), systemd restarts it.
+WatchdogSec=120
+
+# Hardening: the agent needs its state dir, the I2C/GPIO devices and the network.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/sitemon
+DeviceAllow=char-i2c rw
+DeviceAllow=char-gpiochip rw
+
+[Install]
+WantedBy=multi-user.target

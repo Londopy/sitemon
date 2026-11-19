@@ -1,0 +1,19 @@
+# Anubis bot policy for the sitemon hub. The first matching rule wins, so
+# machine endpoints go above the default import.
+bots:
+  # Site agents upload here. They can't run a browser challenge. The hub
+  # checks every upload's Ed25519 signature and refuses forged ones, so
+  # letting this one path through exposes no data.
+  - name: sitemon-ingest
+    path_regex: ^/api/ingest$
+    action: ALLOW
+  # Uptime checks.
+  - name: sitemon-health
+    path_regex: ^/healthz$
+    action: ALLOW
+  - name: well-known
+    path_regex: ^/\.well-known/
+    action: ALLOW
+
+  # upstream defaults, kept current by Anubis releases
+  - import: (data)/meta/default-config.yaml

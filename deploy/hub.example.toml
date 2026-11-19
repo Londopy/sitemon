@@ -1,0 +1,130 @@
+# sitemon hub config: /etc/sitemon/hub.toml
+# Check it with:  sitemon check /etc/sitemon/hub.toml
+# Durations: 30s, 5m, 2h, 7d.
+
+[hub]
+listen = "0.0.0.0:8470"
+db = "/var/lib/sitemon/hub.db"
+public_url = "https://sitemon.example.org"   # used for links in alerts; "" to leave them out
+group = "sites"                               # default group for sites that don't name one
+remind_critical = "12h"                       # repeat a critical alert this often while it lasts
+retention = "400d"                            # keep a year of history plus a margin
+
+# Each group gets its own dashboard page and weekly summary.
+[groups]
+sites = "Repeater sites"
+# hills = "Hilltop sites"
+
+# Sites
+# key = the line `sitemon keygen` printed on the site. During a key change, list both:
+# keys = ["<old>", "<new>"]
+
+[[sites]]
+id = "hilltop"
+name = "Hilltop repeater"
+key = "REPLACE-WITH-SITE-PUBLIC-KEY-FROM-KEYGEN======"
+
+# [[sites]]
+# id = "north-ridge"
+# name = "North Ridge"
+# group = "hills"
+# key = "..."
+
+# Silence
+# A dead site can't report itself. The hub raises this from its own clock.
+[heartbeat]
+warn_after = "5m"
+critical_after = "15m"
+
+# Rules
+# metric = "<sensor name>.<value>", e.g. batt.v, env.temp_c, door.open, ami.registered.
+# sites = ["*"] by default; patterns like ["mtn-*"] work.
+
+[[rules]]
+name = "Battery low"
+metric = "batt.v"
+below = 12.2
+critical_below = 11.8
+hysteresis = 0.1
+hold = "2m"          # must stay low this long: a transmitter key-up sag doesn't count
+unit = "V"
+
+[[rules]]
+name = "Battery falling"
+type = "rate"
+metric = "batt.v"
+window = "7d"
+smooth = "1d"        # daily averages, so the solar charge cycle doesn't look like a trend
+drop = 0.3
+critical_drop = 0.6
+unit = "V"
+
+[[rules]]
+name = "Site too hot"
+metric = "env.temp_c"
+above = 40
+critical_above = 50
+hysteresis = 2
+unit = "°C"
+
+[[rules]]
+name = "Door open"
+type = "state"
+metric = "door.open"
+bad = true
+escalate_after = "30m"   # nobody's on a workday after half an hour: critical
+
+[[rules]]
+name = "Water on the floor"
+type = "state"
+metric = "water.present"
+bad = true
+severity = "critical"
+
+# Only does anything if the agent has registration_command set (see agent.example.toml).
+[[rules]]
+name = "Node not registered with AllStarLink"
+type = "state"
+metric = "ami.registered"
+bad = false
+
+[[rules]]
+name = "AREDN node unreachable"
+type = "state"
+metric = "aredn.reachable"
+bad = false
+
+# Alert channels
+# Secrets come from the environment (*_env) or a file (*_file), never this file.
+
+[[channels]]
+type = "discord"
+name = "discord"
+url_env = "SITEMON_DISCORD_WEBHOOK"
+min_severity = "warn"
+groups = ["*"]
+
+[[channels]]
+type = "ntfy"
+name = "trustee-phones"
+server = "https://ntfy.sh"
+topic = "sitemon-change-me"    # pick something unguessable, or self-host ntfy with a token
+# token_env = "SITEMON_NTFY_TOKEN"
+min_severity = "critical"
+
+# [[channels]]
+# type = "email"
+# name = "trustees"
+# smtp_host = "smtp.example.org"
+# smtp_port = 587
+# smtp_user = "sitemon@example.org"
+# smtp_password_env = "SITEMON_SMTP_PASSWORD"
+# sender = "sitemon@example.org"
+# to = ["trustee@example.org"]
+# min_severity = "warn"
+
+# Weekly summary to Discord
+[summary]
+enabled = true
+day = "mon"
+hour = 8              # hub's local time

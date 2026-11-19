@@ -1,0 +1,81 @@
+# sitemon agent config: /etc/sitemon/agent.toml on the site's Pi.
+# Check it with:  sitemon check /etc/sitemon/agent.toml
+# Durations: 30s, 5m, 2h, 7d.
+
+[site]
+id = "hilltop"                         # must match the [[sites]] id in the hub config
+key = "/etc/sitemon/site.key"          # made by: sitemon keygen --out /etc/sitemon/site.key
+
+[agent]
+data_dir = "/var/lib/sitemon"          # event queue; keep it on the writable partition
+# Every hub gets every event, each at its own pace; an event is deleted here once all have it.
+hubs = [
+  "http://sitemon-hub.local.mesh:8470",
+  "https://sitemon.example.org",
+]
+sample_interval = "30s"                # power and environment
+switch_interval = "1s"                 # door and water inputs
+switch_debounce = "2s"                 # an input must hold a new state this long to count
+heartbeat_interval = "60s"
+flush_interval = "30s"                 # how often buffered events are written to the SD card
+sync_interval = "30s"
+local_ui = "127.0.0.1:8471"            # status page for whoever is in the shack; "" to turn off
+
+# Sensors
+# The name becomes the first half of each metric id: name "batt" -> "batt.v", "batt.a", "batt.w".
+
+[[sensors]]
+type = "ina226"                        # or "ina219" for rails under 26 V at low current
+name = "batt"
+bus = 1                                # /dev/i2c-1
+address = 0x40
+shunt_ohms = 0.002                     # 75 mV / 40 A external shunt = 0.001875; measure yours
+
+[[sensors]]
+type = "bme280"
+name = "env"
+address = 0x76                         # 0x77 on some breakouts (SDO high)
+
+[[sensors]]
+type = "gpio"
+name = "door"
+key = "open"                           # metric "door.open"
+pin = 17                               # BCM numbering
+# Reed switch to ground with the pull-up on: closed door = low, open door = high.
+active_when = "high"
+pull = "up"
+
+# [[sensors]]
+# type = "gpio"
+# name = "water"
+# key = "present"
+# pin = 27
+# active_when = "low"
+# pull = "up"
+
+# Trying it without hardware? Swap the sensors above for these:
+# [[sensors]]
+# type = "sim-battery"
+# name = "batt"
+# float_v = 13.4
+# drift_v_per_day = 0.05
+
+# AllStar
+[ami]
+enabled = true
+host = "127.0.0.1"                     # anything but loopback is refused
+port = 5038
+user = "sitemon"                       # status-only AMI user; see deploy/README.md
+secret_env = "SITEMON_AMI_SECRET"      # or secret_file = "/etc/sitemon/ami.secret"
+node = 1999
+interval = "15s"
+# Optional registration check. Off unless set, because it needs write = command on the AMI
+# user, which allows any CLI command (deploy/README.md section 3). ASL3: "rpt show registrations";
+# older builds: "iax2 show registry". Nothing else is accepted.
+# registration_command = "rpt show registrations"
+
+# AREDN
+[aredn]
+enabled = true
+url = "http://localnode.local.mesh/a/sysinfo?link_info=1"   # /cgi-bin/sysinfo.json on old firmware
+interval = "60s"
