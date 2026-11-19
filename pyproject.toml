@@ -1,0 +1,82 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sitemon"
+version = "0.1.0"
+description = "Power, environment, door, AllStar and AREDN monitoring for repeater sites."
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Londopy" }]
+# 3.11, not 3.10: tomllib is in the standard library from 3.11, and every target
+# (ASL3 on Debian 12, Raspberry Pi OS bookworm) already ships 3.11.
+requires-python = ">=3.11"
+keywords = ["amateur-radio", "repeater", "allstarlink", "aredn", "monitoring", "raspberry-pi"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Telecommunications Industry",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Ham Radio",
+    "Topic :: System :: Monitoring",
+    "Typing :: Typed",
+]
+# Kept small on purpose: these run on a repeater-site Pi that may be updated
+# once a year. aiohttp covers the hub server and every outgoing HTTP call;
+# cryptography is packaged by Debian (python3-cryptography).
+dependencies = [
+    "aiohttp>=3.9",
+    "cryptography>=41",
+]
+
+[project.optional-dependencies]
+# Real hardware only. Without these the agent still runs with simulated sensors.
+pi = ["smbus2>=0.4", "gpiozero>=2.0"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "hypothesis>=6", "ruff>=0.5", "mypy>=1.10"]
+all = ["sitemon[pi,dev]"]
+
+[project.urls]
+Homepage = "https://github.com/Londopy/sitemon"
+Repository = "https://github.com/Londopy/sitemon"
+"Bug Tracker" = "https://github.com/Londopy/sitemon/issues"
+
+[project.scripts]
+sitemon = "sitemon._cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["sitemon"]
+
+[tool.hatch.build.targets.sdist]
+# Deployment files and CI config are for people running the repo, not for
+# anyone installing from PyPI.
+exclude = [".github/", "deploy/"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# Pinned explicitly rather than inherited: ruff's default selection grows over
+# time, and an unpinned CI ruff could turn a green build red without a commit.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = ["slow: end-to-end tests that take several seconds"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+
+[[tool.mypy.overrides]]
+# Hardware libraries ship no type information and are absent off-Pi.
+module = ["smbus2", "gpiozero"]
+ignore_missing_imports = true

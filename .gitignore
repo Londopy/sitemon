@@ -1,0 +1,33 @@
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Python
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# Local runtime data (event logs, hub database)
+*.db
+*.db-wal
+*.db-shm
+/data/
+
+# Secrets: site signing keys, AMI passwords, webhook URLs, Anubis key
+.env
+*.key
+config.toml
+!deploy/**/*.example.toml
+deploy/hub/hub.toml
+deploy/hub/hub.env

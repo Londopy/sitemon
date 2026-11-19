@@ -1,0 +1,22 @@
+name: Feature request
+description: A sensor, rule, alert channel or view you need.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What failed at your site, or what you could not see in time?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+  - type: checkboxes
+    id: monitor
+    attributes:
+      label: Scope
+      options:
+        - label: This is monitoring, not repeater control (sitemon stays a monitor).
+          required: true

@@ -1,0 +1,41 @@
+name: Bug report
+description: Something in sitemon is wrong or missing an alert it should raise.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to reproduce
+      description: Config (with secrets removed), sensor setup, and the steps or conditions that trigger it.
+  - type: input
+    id: version
+    attributes:
+      label: sitemon version
+      placeholder: "sitemon --version"
+    validations:
+      required: true
+  - type: dropdown
+    id: role
+    attributes:
+      label: Where
+      options: [Site agent, Hub, Dashboard, Both]
+    validations:
+      required: true
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Hardware and OS
+      description: Pi model, OS (ASL3 / Pi OS version), sensors and wiring if relevant.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: "`journalctl -u sitemon-agent` or `-u sitemon-hub` around the time. Remove AMI passwords and webhook URLs."
+      render: text
