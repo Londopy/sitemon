@@ -8,6 +8,8 @@ what appears on its GitHub release page. Validated in CI by
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-19
+
 ### Added
 
 - Site agent: INA226/INA219 power, BME280 environment, door and water inputs,
@@ -23,4 +25,5 @@ what appears on its GitHub release page. Validated in CI by
   summary to Discord.
 - Dashboard with a tile and sparklines per site, and CSV export per sensor.
 
-[Unreleased]: https://github.com/Londopy/sitemon/commits/main
+[Unreleased]: https://github.com/Londopy/sitemon/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Londopy/sitemon/releases/tag/v0.1.0
