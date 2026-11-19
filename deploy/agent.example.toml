@@ -79,3 +79,41 @@ interval = "15s"
 enabled = true
 url = "http://localnode.local.mesh/a/sysinfo?link_info=1"   # /cgi-bin/sysinfo.json on old firmware
 interval = "60s"
+
+# RF power trend (deploy/README.md section 8): directional coupler, two AD8307 detectors,
+# an ADS1115 ADC. Recorded only while the transmitter is keyed.
+# [[sensors]]
+# type = "rf"
+# name = "rf"
+# address = 0x48
+# forward_channel = 0
+# reflected_channel = 1
+# slope_mv_per_db = 25.0
+# intercept_dbm = -84.0
+# coupling_db = 50.0                   # coupler plus attenuators in front of each detector
+# min_forward_w = 1.0                  # below this the transmitter counts as unkeyed
+
+# Remote commands (deploy/README.md section 7). Leave this out and the site takes none.
+# [control]
+# hubs = ["https://sitemon.example.org"]   # https, wireline only (Part 97): never a mesh-only hub
+# operators = ["OPERATOR-PUBLIC-KEY"]      # from `sitemon keygen` on each operator's computer
+# hub_keys = ["HUB-PUBLIC-KEY"]            # lets that hub ask for spoken alerts, nothing else
+# watchdog_pin = 22                        # keep-alive for the relay cutoff circuit
+
+# [[relays]]
+# name = "radio"
+# pin = 5
+# mode = "pulse"                       # on for `pulse`, then off: power-cycles the radio
+# pulse = "10s"                        # up to a day; keep it short for anything powering a radio
+# active_low = true                    # most relay boards switch on a low pin
+
+# [[relays]]
+# name = "lights"
+# pin = 6
+# mode = "switch"                      # on and off on command, never on longer than max_on
+# max_on = "2h"
+
+# Spoken alerts on the repeater (deploy/README.md section 9). Needs [ami] and [control] hub_keys.
+# [announce]
+# enabled = true
+# min_gap = "60s"

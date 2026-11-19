@@ -156,6 +156,82 @@ pass the client address in `X-Real-IP` (see the Anubis installation docs for Cad
 without it Anubis refuses requests. Set `TZ` in `docker-compose.yml` so the weekly summary goes
 out at your local hour.
 
+## 7. Relays and remote commands
+
+A relay board on the Pi's GPIO lets you power-cycle a radio or node, or switch shack extras, from
+your own computer. Each relay has a mode and a time limit, and starts off:
+
+- `pulse`: on for `pulse` seconds, then off. Wire a radio's or node's supply through the relay's
+  normally-closed contact, and a pulse cuts the power for that long. A doorbell is a short pulse.
+- `switch`: on and off on command, but never on longer than `max_on` (shack lights).
+
+**Hardware cutoff.** Software limits aren't enough on their own: if the Pi hangs with a relay
+energised, it stays energised. Set `watchdog_pin` and the agent toggles it every second while it's
+healthy. Feed it to a retriggerable monostable (a 74HC123, or a 555 in missing-pulse mode) with
+a period of about 3 s, and let its output switch the relay board's supply through a transistor or
+MOSFET. If the toggling stops, the relays lose power within about 3 seconds.
+
+**Part 97.** Switching a radio or node is remote control of the station (47 CFR 97.213). The
+control link must be wireline (internet, cellular) unless you run a proper auxiliary station on
+2 m or up (97.201). So:
+
+- List only hubs reached over the internet or cellular under `[control] hubs`, by https (sitemon
+  refuses plain http unless the hub is on the Pi itself). Never list a hub that the site only
+  reaches over the AREDN mesh.
+- Keep `pulse` and `max_on` short for anything that powers a transmitter, and the cutoff circuit
+  in place.
+
+**Operator keys.** Each person who may send commands makes their own key, on their own computer:
+
+```bash
+sitemon keygen --out ~/.config/sitemon/operator.key
+```
+
+Put the public key it prints in the site's agent config (`[control] operators`) and in the hub
+config (`[[operators]]`, with the sites that person may command). The private key never leaves
+their computer: the hub only passes commands on, and can't make one.
+
+**Sending a command:**
+
+```bash
+sitemon command hilltop radio pulse --hub https://sitemon.example.org --key ~/.config/sitemon/operator.key
+```
+
+The site collects it the next time it syncs (every 30 s by default), checks the signature, the
+expiry (2 minutes) and that it hasn't seen the command before, and reports back.
+`sitemon command` waits up to 90 s and prints the result. The site's dashboard page lists recent
+commands and the relays' state.
+
+## 8. RF power trend
+
+A directional coupler on the feedline, with an AD8307 log detector on each of its forward and
+reflected ports, feeding an ADS1115 ADC on the Pi's I2C bus. sitemon records forward and reflected
+power, return loss and SWR while the transmitter is keyed, so a feedline or antenna that is
+slowly getting worse shows up as a trend weeks before it fails.
+
+- Put enough attenuation in front of each AD8307 to keep it under +15 dBm at full power, and add
+  the coupler's coupling factor and the attenuators together as `coupling_db`.
+- Calibrate against a wattmeter: transmit at two known powers, read `rf` on the site's status page,
+  and adjust `slope_mv_per_db` and `intercept_dbm` until they agree. It's a trend monitor, so
+  close is good enough.
+- Rules like `SWR above 2` (with a `hold`) and `SWR rose 0.3 in 7 days` are in
+  [hub.example.toml](hub.example.toml).
+
+## 9. Spoken alerts on the air
+
+Off unless you turn it on. When a rule marked `announce = true` goes critical, the hub asks the
+site to say so on the repeater ("Hilltop repeater. Battery low"), at most once every 10 minutes.
+
+1. On the site: `sudo apt install espeak-ng sox`.
+2. Make the hub's own key on the hub: `sitemon keygen --out /etc/sitemon/hub.key`, set
+   `[hub] key` to it, and put the public key it prints in the site's `[control] hub_keys`. The
+   hub's key can only ask for announcements, never relays.
+3. Give the AMI user `write = reporting,command`. As section 3 says, `command` allows any CLI
+   command, so treat that password with care. sitemon itself only ever sends `rpt localplay` with
+   a file it wrote.
+4. Set `[announce] enabled = true` in the agent config and `announce = true` on the rules that
+   should speak.
+
 ## Changing a site's key
 
 1. Add the new public key next to the old one (`keys = ["<old>", "<new>"]`) and restart the hub.

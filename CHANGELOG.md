@@ -8,6 +8,17 @@ what appears on its GitHub release page. Validated in CI by
 
 ## [Unreleased]
 
+### Added
+
+- Relays: power-cycle a radio or node, or switch shack extras, with Ed25519-signed commands that
+  carry a one-time nonce and a 2-minute expiry. Every relay has a time limit, and a keep-alive
+  pin drives a hardware cutoff. Send them with `sitemon command`.
+- RF power trend: forward and reflected power, return loss and SWR from a directional coupler,
+  two AD8307 detectors and an ADS1115, recorded while transmitting.
+- SMS alerts through Twilio.
+- Spoken alerts on the repeater for rules marked `announce`, through espeak-ng and
+  `rpt localplay`. Off by default.
+
 ## [0.1.0] - 2026-11-19
 
 ### Added
