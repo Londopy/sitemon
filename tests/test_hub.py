@@ -15,7 +15,7 @@ from sitemon.hub import alerts, rules
 from sitemon.hub.db import HubDB
 from sitemon.hub.ingest import IngestError, ingest
 from sitemon.hub.server import Hub
-from sitemon.hub.summary import weekly_summary
+from sitemon.hub.summary import low_trend, weekly_summary
 
 from .conftest import make_hub_config
 
@@ -213,6 +213,13 @@ def hub_with(site: Site, **kw: Any) -> Hub:
 
 def feed(hub: Hub, s: Site, kind: str, source: str, data: dict[str, Any], now: float) -> None:
     ingest(hub.db, hub.keys, s.upload([s.event(kind, source, data)]), now=now)
+
+
+def feed_at(hub: Hub, s: Site, source: str, data: dict[str, Any], t: float) -> None:
+    """A reading at ``t``, with the site's monotonic clock kept in step, so
+    readings days apart land days apart."""
+    s.mono = int((t - 30) * 1e9)
+    feed(hub, s, "reading", source, data, t)
 
 
 def test_threshold_open_escalate_resolve_with_hysteresis() -> None:
@@ -538,6 +545,96 @@ def test_weekly_summary_text() -> None:
     text = weekly_summary(hub.cfg, hub.db, "group", NOW + 1)
     assert "**S1**" in text and "batt battery/supply 12.8-13.2 V" in text
     assert "OPEN: Door open" in text
+
+
+@pytest.mark.parametrize(("per_day", "words"), [(-0.02, "falling 0.14"), (0.006, "rising 0.04")])
+def test_weekly_summary_reports_the_battery_trend(per_day: float, words: str) -> None:
+    s = Site()
+    hub = hub_with(s)
+    for day in range(14):
+        t = NOW - 86400 * (13 - day)
+        feed_at(hub, s, "batt", {"v": 13.4}, t)
+        feed_at(hub, s, "batt", {"v": 12.6 + per_day * day}, t + 3600)
+    text = weekly_summary(hub.cfg, hub.db, "group", NOW + 7200)
+    assert f"batt nightly low {words} V a week over 30 days" in text
+
+
+DAY = 86400.0
+
+
+def put_lows(db: HubDB, lows: list[float], end: float) -> None:
+    """One low a day, the last on the day of ``end``, plus a charged reading
+    each afternoon."""
+    first = end - (len(lows) - 1) * DAY
+    with db.tx() as c:
+        for i, lo in enumerate(lows):
+            c.execute("INSERT INTO points VALUES ('s1', 'batt.v', ?, ?)", (first + i * DAY, lo))
+            c.execute("INSERT INTO points VALUES ('s1', 'batt.v', ?, ?)", (first + i * DAY + 1, 14))
+
+
+def test_trend_needs_seven_whole_days() -> None:
+    db = HubDB(":memory:")
+    put_lows(db, [12.0 - 0.01 * i for i in range(8)], NOW)
+    assert low_trend(db, "s1", "batt.v", NOW + 2) is None  # 6 whole days
+    db = HubDB(":memory:")
+    put_lows(db, [12.0 - 0.01 * i for i in range(9)], NOW)
+    assert low_trend(db, "s1", "batt.v", NOW + 2) == pytest.approx(-0.07)
+
+
+def test_trend_ignores_old_data_and_one_bad_sample() -> None:
+    db = HubDB(":memory:")
+    lows = [14.0 - 0.1 * i for i in range(20)] + [12.0] * 25  # a steep fall 25+ days ago
+    lows[-5] = 0.0  # one glitch
+    put_lows(db, lows, NOW)
+    assert low_trend(db, "s1", "batt.v", NOW + 2) == pytest.approx(0.0)
+
+
+def solar_volts(t: float) -> float:
+    """12.2 V at 14:00 UTC, 14.2 V at 22:00, back down overnight; the same every day."""
+    h = (t % DAY) / 3600
+    if 14 <= h < 22:
+        return 12.2 + 2.0 * (h - 14) / 8
+    if h >= 22:
+        return 14.2 - 2.0 * (h - 22) / 16
+    return 14.2 - 2.0 * (h + 2) / 16
+
+
+@pytest.mark.parametrize("hour", [4, 20])
+def test_flat_solar_battery_is_steady_whatever_the_hour(hour: int) -> None:
+    db = HubDB(":memory:")
+    now = 20_040 * DAY + hour * 3600
+    with db.tx() as c:
+        c.executemany(
+            "INSERT INTO points (site, metric, t, value) VALUES ('s1', 'batt.v', ?, ?)",
+            [(t, solar_volts(t)) for t in (now - 45 * DAY + i * 1800 for i in range(45 * 48 + 1))],
+        )
+    trend = low_trend(db, "s1", "batt.v", now)
+    assert trend is not None and abs(trend) < 0.005
+
+
+def test_new_site_does_not_report_a_trend_from_its_first_part_day() -> None:
+    db = HubDB(":memory:")
+    start = 20_000 * DAY + 21 * 3600  # installed in the evening, the charge peak
+    now = start + 9 * DAY
+    with db.tx() as c:
+        c.executemany(
+            "INSERT INTO points (site, metric, t, value) VALUES ('s1', 'batt.v', ?, ?)",
+            [(t, solar_volts(t)) for t in (start + i * 1800 for i in range(9 * 48 + 1))],
+        )
+    trend = low_trend(db, "s1", "batt.v", now)
+    assert trend is not None and abs(trend) < 0.005
+
+
+def test_battery_trend_needs_a_week_and_says_steady() -> None:
+    s = Site()
+    hub = hub_with(s)
+    for day in range(5):
+        feed_at(hub, s, "batt", {"v": 12.6}, NOW - 86400 * (4 - day))
+    assert "nightly low" not in weekly_summary(hub.cfg, hub.db, "group", NOW + 1)
+    for day in range(5, 10):
+        feed_at(hub, s, "batt", {"v": 12.6}, NOW + 86400 * (day - 4))
+    text = weekly_summary(hub.cfg, hub.db, "group", NOW + 86400 * 6 + 1)
+    assert "batt nightly low steady over 30 days" in text
 
 
 def test_summary_queued_once_at_configured_time() -> None:
