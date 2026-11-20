@@ -247,6 +247,8 @@ def cmd_demo(a: argparse.Namespace) -> int:
             sim.environment("env", base_c=24.0),
             sim.switch("door", "open", active=door),
         ]
+        if sid == "hilltop":
+            sensors.append(sim.rf("rf", forward_w=50.0, swr=1.4))
         agents.append(Agent(cfg, keys[sid], sensors))
 
     async def main() -> None:

@@ -706,7 +706,33 @@ async def test_http_api_end_to_end() -> None:
         assert (await client.get("/static/../db.py")).status == 404
         assert (await client.get("/site/s1")).status == 200
         site = await (await client.get("/api/site/s1")).json()
-        assert "batt.v" in site["metrics"]
+        assert "batt.v" in site["metrics"] and site["days"] == 7
+
+        r = await client.get("/api/site/s1", params={"days": "nan"})
+        assert r.status == 400
+        assert (await client.get("/api/site/s1", params={"days": "x"})).status == 400
+        site = await (await client.get("/api/site/s1", params={"days": "1e9"})).json()
+        assert site["days"] == 400  # the retention period
+        for days in ("0", "-5"):
+            assert (await (await client.get("/api/site/s1", params={"days": days})).json())[
+                "days"
+            ] == 1
+
+
+async def test_site_page_range_reaches_older_readings_and_charts_rf() -> None:
+    s = Site()
+    hub = hub_with(s)
+    now = time.time()
+    for days_ago in range(24, -1, -1):
+        feed_at(hub, s, "batt", {"v": 12.5 - 0.01 * (24 - days_ago)}, now - 86400 * days_ago)
+    feed_at(hub, s, "rf", {"fwd_w": 48.0, "ref_w": 1.2, "swr": 1.37}, now - 60)
+    async with TestClient(TestServer(hub.make_app())) as client:
+        week = await (await client.get("/api/site/s1")).json()
+        month = await (await client.get("/api/site/s1", params={"days": "30"})).json()
+    assert len(week["spark"]["batt.v"]) == 7
+    assert len(month["spark"]["batt.v"]) == 25
+    assert len(week["spark"]["rf.fwd_w"]) == 1 and len(week["spark"]["rf.swr"]) == 1
+    assert week["trends"]["batt.v"] == pytest.approx(-0.07)
 
 
 class FakeSMTP:

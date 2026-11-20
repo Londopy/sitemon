@@ -29,12 +29,12 @@ from ..config import ChannelConfig, ConfigError, HubConfig, RuleConfig, SiteConf
 from . import alerts, channels, commands, rules
 from .db import HubDB
 from .ingest import IngestError, IngestResult, check_envelope, ingest
-from .summary import weekly_summary
+from .summary import low_trend, weekly_summary
 
 log = logging.getLogger("sitemon.hub")
 
 GIVE_UP_AFTER = 86400.0
-SPARK_KEYS = ("v", "a", "temp_c", "rh", "link_count")
+SPARK_KEYS = ("v", "a", "temp_c", "rh", "link_count", "fwd_w", "swr")
 
 
 class Hub:
@@ -59,6 +59,7 @@ class Hub:
         self._session: aiohttp.ClientSession | None = None
         # Unauthenticated, so this only annotates a real silence.
         self.bad_uploads: dict[str, str] = {}
+        self.trend_cache: dict[str, tuple[float, dict[str, float]]] = {}
 
     def evaluate(self, site_id: str, now: float | None = None) -> list[alerts.Notice]:
         now = time.time() if now is None else now
@@ -408,7 +409,9 @@ class Hub:
             ]
         )
 
-    def site_summary(self, site: SiteConfig, now: float, spark_hours: float = 24) -> dict[str, Any]:
+    def site_summary(
+        self, site: SiteConfig, now: float, spark_hours: float = 24, points: int = 96
+    ) -> dict[str, Any]:
         latest = self.db.latest(site.id)
         last = self.db.last_contact(site.id)
         open_alerts = self.db.open_alerts(site.id)
@@ -418,7 +421,9 @@ class Hub:
         spark: dict[str, list[tuple[float, float]]] = {}
         for metric, (value, _t) in latest.items():
             if metric.rpartition(".")[2] in SPARK_KEYS and isinstance(value, (int, float)):
-                spark[metric] = self.db.series(site.id, metric, now - spark_hours * 3600, now, 96)
+                spark[metric] = self.db.series(
+                    site.id, metric, now - spark_hours * 3600, now, points
+                )
         return {
             "id": site.id,
             "name": site.name,
@@ -456,8 +461,17 @@ class Hub:
         site = self.sites.get(req.match_info["site"])
         if site is None:
             raise web.HTTPNotFound(text="no such site")
+        try:
+            days = float(req.query.get("days", "7"))
+        except ValueError as e:
+            raise web.HTTPBadRequest(text="days must be a number") from e
+        if not math.isfinite(days):
+            raise web.HTTPBadRequest(text="days must be a number")
+        days = min(max(days, 1.0), self.cfg.retention / 86400)
         now = time.time()
-        out = self.site_summary(site, now, spark_hours=24 * 7)
+        out = self.site_summary(site, now, spark_hours=24 * days, points=300)
+        out["days"] = days
+        out["trends"] = self._trends(site.id, list(out["spark"]), now)
         out["metrics"] = self.db.metrics(site.id)
         out["group_name"] = self.cfg.groups.get(site.group, site.group)
         out["recent_alerts"] = [
@@ -473,6 +487,18 @@ class Hub:
         ][-50:]
         out["commands"] = commands.recent(self.db, site.id)
         return web.json_response(out)
+
+    def _trends(self, site: str, metrics: list[str], now: float) -> dict[str, float]:
+        # They move over weeks, and each one scans a month of points.
+        cached = self.trend_cache.get(site)
+        if cached is None or now - cached[0] > 600:
+            trends = {
+                m: t
+                for m in metrics
+                if m.endswith(".v") and (t := low_trend(self.db, site, m, now)) is not None
+            }
+            cached = self.trend_cache[site] = (now, trends)
+        return cached[1]
 
     def _range(self, req: web.Request) -> tuple[str, str, float, float]:
         site = req.query.get("site", "")

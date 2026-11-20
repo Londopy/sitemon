@@ -38,7 +38,8 @@ Dashboard: http://127.0.0.1:8470  (data in /tmp/sitemon-demo-1a2b; Ctrl+C to sto
   by Discord, ntfy, email or SMS. Queued and retried when the hub's internet path is down.
   Optionally spoken on the repeater itself.
 - **Dashboard:** a tile per site with sparklines, a plain-language status, a page per site with
-  7-day charts and alert history, and CSV export for every sensor. Weekly summary to Discord.
+  charts over 7 days to a year, alert and command history, and CSV export for every sensor.
+  Weekly summary to Discord, including which way each battery's nightly low is heading.
 - **Built for transmitter sites:** I2C error recovery, chips re-initialised after RF-induced
   resets, systemd watchdog, batched writes to spare the SD card.
 
