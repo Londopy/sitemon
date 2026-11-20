@@ -8,6 +8,14 @@ what appears on its GitHub release page. Validated in CI by
 
 ## [Unreleased]
 
+### Added
+
+- The site page charts 7, 30, 90 or 365 days, and lists recent relay commands and announcements.
+- Forward power and SWR get charts and sparklines like the other readings.
+- Battery trend: the weekly summary and the site page say how fast each battery's nightly low
+  is falling or rising, fitted over 30 days, so a battery that is wearing out shows up early.
+- `sitemon demo` includes an RF sensor on the Hilltop site.
+
 ## [0.2.0] - 2026-11-19
 
 ### Added

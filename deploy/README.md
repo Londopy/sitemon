@@ -200,7 +200,7 @@ sitemon command hilltop radio pulse --hub https://sitemon.example.org --key ~/.c
 The site collects it the next time it syncs (every 30 s by default), checks the signature, the
 expiry (2 minutes) and that it hasn't seen the command before, and reports back.
 `sitemon command` waits up to 90 s and prints the result. The site's dashboard page lists recent
-commands and the relays' state.
+commands, and the relays' state under its latest values.
 
 ## 8. RF power trend
 

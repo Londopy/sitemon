@@ -5,7 +5,10 @@ const NAMES = {
   v: ["voltage", "V"], a: ["current", "A"], w: ["power", "W"],
   temp_c: ["temperature", "°C"], rh: ["humidity", "%"], hpa: ["pressure", "hPa"],
   link_count: ["links", ""], rf_links: ["RF links", ""], queue: ["queued events", ""],
+  fwd_w: ["forward power", "W"], ref_w: ["reflected power", "W"], rl_db: ["return loss", "dB"],
+  swr: ["SWR", ""],
 };
+const RANGES = [7, 30, 90, 365];
 
 function el(tag, attrs = {}, ...kids) {
   const e = document.createElement(tag);
@@ -138,7 +141,12 @@ async function groupPage(slug) {
   document.getElementById("foot").textContent = `sitemon ${group.version}`;
 }
 
-function chart(siteId, metric, points, latest) {
+function trendText(perWeek) {
+  if (Math.abs(perWeek) < 0.01) return "nightly low steady over 30 d";
+  return `nightly low ${perWeek < 0 ? "falling" : "rising"} ${Math.abs(perWeek).toFixed(2)} V a week over 30 d`;
+}
+
+function chart(siteId, metric, points, latest, days, trend) {
   const W = 600, H = 140;
   const s = svg("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", role: "img" });
   const l = line(points, W, H - 14, 4);
@@ -156,20 +164,43 @@ function chart(siteId, metric, points, latest) {
     el("div", { class: "chart-head" },
       el("b", {}, label(metric)),
       el("span", {}, latest ? fmt(latest.value, metric) : ""),
-      el("span", {},
-        el("a", { href: `/api/csv?${q}&hours=168` }, "CSV 7 d"), " · ",
-        el("a", { href: `/api/csv?${q}&hours=2160` }, "90 d"))),
+      trend === undefined ? "" : el("span", { class: "muted" }, trendText(trend)),
+      el("a", { href: `/api/csv?${q}&hours=${days * 24}` }, `CSV ${days} d`)),
     s);
 }
 
+function commandText(c) {
+  const arg = k => typeof c.args[k] === "string" || typeof c.args[k] === "number" ? String(c.args[k]) : "";
+  if (c.kind === "announce") return `say "${arg("text")}"`;
+  const secs = arg("seconds") ? ` ${arg("seconds")} s` : "";
+  return `${arg("relay") || "?"} ${arg("action") || "?"}${secs}`;
+}
+
+function rangeLinks(days) {
+  const links = RANGES.map(d => d === days
+    ? el("b", { "aria-current": "page" }, `${d} d`)
+    : el("a", { href: `?days=${d}` }, `${d} d`));
+  return el("nav", { class: "ranges", "aria-label": "Chart range" },
+    ...links.flatMap((l, i) => i ? [" · ", l] : [l]));
+}
+
+function wantedDays() {
+  const d = Number(new URLSearchParams(location.search).get("days"));
+  return Number.isFinite(d) && d > 0 ? d : 7;
+}
+
 async function sitePage(id) {
-  const site = await getJSON(`/api/site/${encodeURIComponent(id)}`);
+  const wanted = wantedDays();
+  const site = await getJSON(`/api/site/${encodeURIComponent(id)}?days=${wanted}`);
+  const days = Math.round(site.days);
   document.title = `${site.name} · sitemon`;
   document.getElementById("crumb").replaceChildren(
     el("a", { href: `/group/${encodeURIComponent(site.group)}` }, site.group_name), " / ", site.name);
   const main = document.getElementById("main");
   const charts = el("div", {});
-  for (const [m, pts] of Object.entries(site.spark)) charts.append(chart(site.id, m, pts, site.latest[m]));
+  for (const [m, pts] of Object.entries(site.spark)) {
+    charts.append(chart(site.id, m, pts, site.latest[m], days, site.trends[m]));
+  }
   const rows = Object.entries(site.latest)
     // a cleared sensor fault is null: nothing worth a row
     .filter(([m, info]) => !m.startsWith("_") && !(m.endsWith(".fault") && info.value === null))
@@ -180,15 +211,22 @@ async function sitePage(id) {
     el("td", {}, a.message),
     el("td", { class: "muted" }, new Date(a.opened * 1000).toLocaleString()),
     el("td", { class: "muted" }, a.resolved ? `resolved ${new Date(a.resolved * 1000).toLocaleString()}` : "open")));
+  const cmds = site.commands.map(c => el("tr", {},
+    el("td", {}, commandText(c)),
+    el("td", { class: c.status === "refused" ? "sev-warn" : "" }, c.status),
+    el("td", {}, c.detail ?? ""),
+    el("td", { class: "muted" }, new Date(c.created * 1000).toLocaleString())));
   main.replaceChildren(
     el("h1", {}, site.name),
     el("div", { class: `tile ${site.status}` },
       el("div", { class: "status" }, statusText(site)),
       el("div", { class: "muted" }, `Last contact ${ago(site.last_contact_s)}`)),
-    el("h2", {}, "Last 7 days"), charts.childNodes.length ? charts : el("p", { class: "muted" }, "No readings yet."),
+    el("div", { class: "range-head" }, el("h2", {}, `Last ${days} days`), rangeLinks(days)),
+    charts.childNodes.length ? charts : el("p", { class: "muted" }, "No readings yet."),
     el("h2", {}, "Latest values"), el("div", { class: "table-wrap" }, el("table", {}, ...rows)),
     el("h2", {}, "Alerts, last 30 days"),
-    hist.length ? el("div", { class: "table-wrap" }, el("table", {}, ...hist)) : el("p", { class: "muted" }, "None."));
+    hist.length ? el("div", { class: "table-wrap" }, el("table", {}, ...hist)) : el("p", { class: "muted" }, "None."),
+    ...(cmds.length ? [el("h2", {}, "Commands"), el("div", { class: "table-wrap" }, el("table", {}, ...cmds))] : []));
 }
 
 async function groupsPage() {
@@ -211,4 +249,5 @@ async function render() {
 }
 
 render();
-setInterval(render, 30000);
+// Long ranges change slowly and cost the hub more to draw.
+setInterval(render, wantedDays() > 7 ? 300000 : 30000);

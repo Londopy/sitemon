@@ -65,6 +65,8 @@ h2 { font-size: 1.05rem; margin: 1.5rem 0 .6rem; }
 .chart { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: .7rem .9rem; margin-bottom: 12px; }
 .chart-head { display: flex; justify-content: space-between; gap: .5rem; flex-wrap: wrap; font-size: .9rem; }
 .chart svg { width: 100%; height: 140px; }
+.range-head { display: flex; gap: 1rem; align-items: baseline; flex-wrap: wrap; }
+.ranges { font-size: .9rem; }
 .axis { stroke: var(--line); stroke-width: 1; }
 .axis-label { fill: var(--muted); font-size: 10px; }
 table { border-collapse: collapse; width: 100%; background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
