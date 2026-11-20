@@ -9,6 +9,7 @@ from collections.abc import Callable
 from typing import Literal
 
 from .base import SensorError, Value
+from .rf import vswr
 
 Clock = Callable[[], float]
 
@@ -17,8 +18,10 @@ class SimSensor:
     """A sensor whose values come from a function of time.
 
     ``values`` maps each key to a function ``f(t) -> value`` where ``t`` is
-    seconds since the sensor was created. ``overrides`` pins a key to a fixed
-    value (tests use this to force a low battery or an open door).
+    seconds since the sensor was created. While ``when(t)`` is false it reads
+    ``{}``, as an unkeyed transmitter does, and ``fast`` puts it on the agent's
+    1 s loop. ``overrides`` pins a key to a fixed value (tests use this to force
+    a low battery or an open door).
     """
 
     def __init__(
@@ -27,11 +30,15 @@ class SimSensor:
         kind: Literal["reading", "state"],
         values: dict[str, Callable[[float], Value]],
         *,
+        when: Callable[[float], bool] | None = None,
+        fast: bool = False,
         clock: Clock = time.monotonic,
     ) -> None:
         self.name = name
         self.kind: Literal["reading", "state"] = kind
+        self.fast = fast
         self._values = values
+        self._when = when
         self._clock = clock
         self._t0 = clock()
         self.overrides: dict[str, Value] = {}
@@ -43,6 +50,8 @@ class SimSensor:
             self.fail_reads = max(0, self.fail_reads - 1)
             raise SensorError(f"{self.name}: simulated I2C error")
         t = self._clock() - self._t0
+        if self._when is not None and not self._when(t):
+            return {}
         out = {k: f(t) for k, f in self._values.items()}
         out.update(self.overrides)
         return out
@@ -103,3 +112,49 @@ def switch(
 ) -> SimSensor:
     """A door or water input that stays where it is put (set ``overrides[key]``)."""
     return SimSensor(name, "state", {key: lambda t: active}, clock=clock)
+
+
+def rf(
+    name: str = "rf",
+    *,
+    forward_w: float = 50.0,
+    swr: float = 1.3,
+    duty: float = 0.3,
+    seed: int = 3,
+    clock: Clock = time.monotonic,
+) -> SimSensor:
+    """A transmitter keyed for ``duty`` of every minute into a load of ``swr``.
+    Like the real sensor, it reads ``{}`` while unkeyed."""
+    if swr <= 1:
+        raise ValueError(f"{name}: swr must be more than 1, not {swr!r}")
+    return_loss_db = -20 * math.log10((swr - 1) / (swr + 1))
+
+    def keyed(t: float) -> bool:
+        return t % 60 < duty * 60
+
+    def line(t: float) -> tuple[float, float]:
+        # Seeded by the read time, so the four values of one read agree.
+        rng = random.Random(f"{seed}/{t}")
+        return forward_w * (1 + _noise(rng, 0.02)), return_loss_db * (1 + _noise(rng, 0.02))
+
+    def fwd_w(t: float) -> float:
+        return round(line(t)[0], 1)
+
+    def ref_w(t: float) -> float:
+        fwd, rl = line(t)
+        return round(fwd * 10 ** (-rl / 10), 1)
+
+    def rl_db(t: float) -> float:
+        return round(line(t)[1], 1)
+
+    def load_swr(t: float) -> float:
+        return round(vswr(line(t)[1]), 2)
+
+    return SimSensor(
+        name,
+        "reading",
+        {"fwd_w": fwd_w, "ref_w": ref_w, "rl_db": rl_db, "swr": load_swr},
+        when=keyed,
+        fast=True,
+        clock=clock,
+    )

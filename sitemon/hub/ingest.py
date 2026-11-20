@@ -81,29 +81,35 @@ def _check_event(raw: Any, site: str, site_keys: list[PublicKey]) -> Event:
     return ev
 
 
-def ingest(
-    db: HubDB, keys: dict[str, list[PublicKey]], env: Any, *, now: float | None = None
-) -> IngestResult:
-    recv = time.time() if now is None else now
+def check_envelope(keys: dict[str, list[PublicKey]], env: Any) -> dict[str, Any]:
+    """The signed part of a site's upload, once its signature checks out."""
     if not isinstance(env, dict):
         raise IngestError(400, "upload must be a JSON object")
     try:
-        site = str(env["site"])
-        boot = str(env["boot"])
-        mono_now = int(env["mono_ns"])
-        raw_events = env["events"]
-        sig = str(env["sig"])
-        if not isinstance(raw_events, list):
+        if not isinstance(env["events"], list):
             raise TypeError("events must be a list")
+        int(env["mono_ns"])
+        sig = str(env["sig"])
         body = envelope_body(env)
     except (KeyError, TypeError, ValueError, IndexError) as e:
         raise IngestError(400, f"malformed upload: {e}") from e
-
+    site = str(body["site"])
     site_keys = keys.get(site)
     if not site_keys:
         raise IngestError(403, f"unknown site {site!r}")
     if not any(k.verify(sig, canonical_json(body)) for k in site_keys):
         raise IngestError(403, f"bad upload signature from {site!r}")
+    return body
+
+
+def ingest(
+    db: HubDB, keys: dict[str, list[PublicKey]], env: Any, *, now: float | None = None
+) -> IngestResult:
+    recv = time.time() if now is None else now
+    body = check_envelope(keys, env)
+    site, boot, mono_now = str(body["site"]), str(body["boot"]), int(body["mono_ns"])
+    raw_events = env["events"]
+    site_keys = keys[site]
 
     result = IngestResult(site=site)
     events: list[Event] = []
@@ -195,6 +201,18 @@ def ingest(
             if cur.rowcount == 0:
                 continue  # already have it: a retried upload
             result.stored.append((ev, t))
+            if ev.kind == "command":
+                c.execute(
+                    "UPDATE commands SET status=?, detail=?, updated=? WHERE nonce=? AND site=?",
+                    (
+                        "done" if ev.data.get("ok") else "refused",
+                        str(ev.data.get("detail", "")),
+                        recv,
+                        str(ev.data.get("nonce", "")),
+                        site,
+                    ),
+                )
+                continue
             if ev.kind in ("reading", "state", "heartbeat"):
                 c.executemany(
                     "INSERT INTO points (site, metric, t, value) VALUES (?, ?, ?, ?)",

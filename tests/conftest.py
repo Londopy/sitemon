@@ -159,7 +159,7 @@ class FakeAmi:
                         ).encode()
                     )
                 elif act == "command":
-                    # The registration check is the only command sitemon sends.
+                    # Any command gets the registration listing; that is all the tests need.
                     out = [
                         "Host  Username  Perceived  Refresh  State",
                         "x  1999  1.2.3.4  60  "

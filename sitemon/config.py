@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from ._duration import parse_duration
+from ._events import PublicKey
 
 Severity = Literal["warn", "critical"]
 
@@ -87,6 +88,31 @@ class ArednConfig:
 
 
 @dataclass
+class RelayConfig:
+    name: str
+    pin: int
+    mode: Literal["pulse", "switch"]
+    active_low: bool
+    pulse: float  # pulse mode: how long it stays on
+    max_on: float  # switch mode: the longest it may stay on
+
+
+@dataclass
+class ControlConfig:
+    hubs: list[str]  # hubs commands may come from: wireline paths only (Part 97)
+    operators: list[str]  # public keys allowed to command relays
+    hub_keys: list[str]  # public keys allowed to request announcements
+    watchdog_pin: int | None
+
+
+@dataclass
+class AnnounceConfig:
+    say_command: list[str]
+    convert_command: list[str]
+    min_gap: float
+
+
+@dataclass
 class AgentConfig:
     site: str
     key_path: str
@@ -103,6 +129,148 @@ class AgentConfig:
     sensors: list[SensorConfig] = field(default_factory=list)
     ami: AmiConfig | None = None
     aredn: ArednConfig | None = None
+    control: ControlConfig | None = None
+    relays: list[RelayConfig] = field(default_factory=list)
+    announce: AnnounceConfig | None = None
+
+
+def _keys(v: Any, where: str) -> list[str]:
+    if not isinstance(v, list) or not all(isinstance(k, str) for k in v):
+        raise ConfigError(f"{where} must be a list of public keys")
+    for k in v:
+        try:
+            PublicKey.from_b64(k)
+        except ValueError as e:
+            raise ConfigError(f"{where}: {k!r} is not a public key from `sitemon keygen`") from e
+    return v
+
+
+SHELLS = {
+    "sh",
+    "bash",
+    "dash",
+    "zsh",
+    "ash",
+    "busybox",
+    "env",
+    "cmd",
+    "cmd.exe",
+    "powershell",
+    "pwsh",
+}
+
+
+def _command(v: Any, needs: tuple[str, ...], where: str) -> list[str]:
+    if not isinstance(v, list) or not v or not all(isinstance(x, str) for x in v):
+        raise ConfigError(f"{where} must be a list: the program and its arguments")
+    # The spoken text is untrusted; through a shell it could run commands.
+    if os.path.basename(v[0]).lower() in SHELLS:
+        raise ConfigError(f"{where}: run the program directly, not through a shell")
+    for n in needs:
+        if not any(n in x for x in v):
+            raise ConfigError(f"{where} must use {n}")
+    try:
+        for x in v:
+            x.format(text="t", wav="w", out="o")
+    except (KeyError, IndexError, ValueError) as e:
+        raise ConfigError(f"{where}: only {{text}}, {{wav}} and {{out}} can be used ({e})") from e
+    return v
+
+
+def _pin(v: Any, where: str) -> int:
+    if not isinstance(v, int) or isinstance(v, bool) or not 0 <= v <= 27:
+        raise ConfigError(f"{where}: a BCM GPIO number, 0-27")
+    return v
+
+
+def _limit(d: dict[str, Any], key: str, default: str, where: str) -> float:
+    v = _dur(d, key, default, where)
+    if not 0 < v <= 86400:
+        raise ConfigError(f"{where}.{key}: more than 0 and at most a day")
+    return v
+
+
+def _control_hub(url: str) -> None:
+    # Commands are signed either way, but over plain HTTP anyone on the path
+    # sees them and can hold them back; loopback is fine for a hub on the Pi.
+    from urllib.parse import urlsplit
+
+    u = urlsplit(url)
+    if u.scheme == "https":
+        return
+    if u.scheme == "http" and u.hostname is not None:
+        try:
+            if u.hostname == "localhost" or ipaddress.ip_address(u.hostname).is_loopback:
+                return
+        except ValueError:
+            pass
+    raise ConfigError(f"[control] hubs: {url!r} must be https (or a hub on this machine)")
+
+
+def _control(c: dict[str, Any], hubs: list[str]) -> ControlConfig:
+    chubs = c.get("hubs", [])
+    if not isinstance(chubs, list) or not chubs:
+        raise ConfigError("[control] hubs: list the hub URLs commands may come from")
+    for h in chubs:
+        if h not in hubs:
+            raise ConfigError(f"[control] hubs: {h!r} is not in [agent] hubs")
+        _control_hub(h)
+    pin = c.get("watchdog_pin")
+    return ControlConfig(
+        hubs=chubs,
+        operators=_keys(c.get("operators", []), "[control] operators"),
+        hub_keys=_keys(c.get("hub_keys", []), "[control] hub_keys"),
+        watchdog_pin=None if pin is None else _pin(pin, "[control] watchdog_pin"),
+    )
+
+
+def _relays(raw: list[dict[str, Any]], taken: set[int]) -> list[RelayConfig]:
+    out = []
+    names: set[str] = set()
+    for i, r in enumerate(raw):
+        where = f"relays[{i}]"
+        name, pin = r.get("name"), r.get("pin")
+        if not isinstance(name, str) or not name or "." in name:
+            raise ConfigError(f"{where}: a name without '.' is required")
+        if name in names:
+            raise ConfigError(f"{where}: duplicate relay name {name!r}")
+        pin = _pin(pin, f"{where}.pin")
+        if pin in taken:
+            raise ConfigError(f"{where}: GPIO{pin} is already used")
+        mode = r.get("mode", "pulse")
+        if mode not in ("pulse", "switch"):
+            raise ConfigError(f"{where}: mode must be pulse or switch")
+        names.add(name)
+        taken.add(pin)
+        out.append(
+            RelayConfig(
+                name=name,
+                pin=pin,
+                mode=mode,
+                active_low=bool(r.get("active_low", True)),
+                pulse=_limit(r, "pulse", "10s", where),
+                max_on=_limit(r, "max_on", "1h", where),
+            )
+        )
+    return out
+
+
+def _announce(a: dict[str, Any]) -> AnnounceConfig:
+    return AnnounceConfig(
+        say_command=_command(
+            a.get("say_command", ["espeak-ng", "-s", "140", "-w", "{wav}", "{text}"]),
+            ("{text}", "{wav}"),
+            "[announce] say_command",
+        ),
+        convert_command=_command(
+            a.get(
+                "convert_command", ["sox", "{wav}", "-r", "8000", "-c", "1", "-b", "16", "{out}"]
+            ),
+            ("{wav}", "{out}"),
+            "[announce] convert_command",
+        ),
+        min_gap=_dur(a, "min_gap", "60s", "announce"),
+    )
 
 
 def _check_loopback(host: str) -> None:
@@ -182,6 +350,24 @@ def load_agent_config(path: str) -> AgentConfig:
             interval=_dur(r, "interval", "60s", "aredn"),
         )
 
+    control = _control(raw["control"], hubs) if raw.get("control") else None
+    taken = {int(sc.options["pin"]) for sc in sensors if "pin" in sc.options}
+    if control is not None and control.watchdog_pin is not None:
+        if control.watchdog_pin in taken:
+            raise ConfigError(f"[control] watchdog_pin: GPIO{control.watchdog_pin} is already used")
+        taken.add(control.watchdog_pin)
+    relays = _relays(raw.get("relays", []), taken)
+    if relays and (control is None or not control.operators):
+        raise ConfigError("relays need [control] with at least one operator key")
+
+    announce = None
+    if (an := raw.get("announce")) and an.get("enabled", False):
+        if ami is None:
+            raise ConfigError("[announce] needs [ami]: announcements play through app_rpt")
+        if control is None or not control.hub_keys:
+            raise ConfigError("[announce] needs [control] hub_keys: the hub signs announcements")
+        announce = _announce(an)
+
     return AgentConfig(
         site=site["id"],
         key_path=site["key"],
@@ -198,6 +384,9 @@ def load_agent_config(path: str) -> AgentConfig:
         sensors=sensors,
         ami=ami,
         aredn=aredn,
+        control=control,
+        relays=relays,
+        announce=announce,
     )
 
 
@@ -234,12 +423,13 @@ class RuleConfig:
     # all
     escalate_after: float | None = None
     hold: float = 0.0
+    announce: bool = False
     unit: str = ""
 
 
 @dataclass
 class ChannelConfig:
-    type: Literal["discord", "ntfy", "email"]
+    type: Literal["discord", "ntfy", "email", "sms"]
     name: str
     min_severity: Literal["info", "warn", "critical"]
     url: str = ""
@@ -252,7 +442,15 @@ class ChannelConfig:
     sender: str = ""
     to: list[str] = field(default_factory=list)
     starttls: bool = True
+    account_sid: str = ""
     groups: list[str] = field(default_factory=lambda: ["*"])
+
+
+@dataclass
+class OperatorConfig:
+    name: str
+    key: str
+    sites: list[str]
 
 
 @dataclass
@@ -271,6 +469,9 @@ class HubConfig:
     summary_hour: int = 8
     summary_enabled: bool = True
     retention: float = 400 * 86400.0
+    key_path: str = ""  # the hub's own key, which signs announcements
+    operators: list[OperatorConfig] = field(default_factory=list)
+    announce_gap: float = 600.0
 
 
 def _patterns(v: Any, where: str) -> list[str]:
@@ -326,6 +527,7 @@ def _rule(i: int, r: dict[str, Any]) -> RuleConfig:
         raise ConfigError(
             f"{where}: hold works on threshold rules and true/false or numeric states"
         )
+    rule.announce = bool(r.get("announce", False))
     rule.unit = str(r.get("unit", ""))
     return rule
 
@@ -333,8 +535,8 @@ def _rule(i: int, r: dict[str, Any]) -> RuleConfig:
 def _channel(i: int, c: dict[str, Any]) -> ChannelConfig:
     where = f"channels[{i}]"
     ctype = c.get("type")
-    if ctype not in ("discord", "ntfy", "email"):
-        raise ConfigError(f"{where}: type must be discord, ntfy or email")
+    if ctype not in ("discord", "ntfy", "email", "sms"):
+        raise ConfigError(f"{where}: type must be discord, ntfy, email or sms")
     minsev = c.get("min_severity", "warn")
     if minsev not in ("info", "warn", "critical"):
         raise ConfigError(f"{where}: min_severity must be info, warn or critical")
@@ -352,6 +554,15 @@ def _channel(i: int, c: dict[str, Any]) -> ChannelConfig:
             raise ConfigError(f"{where}: topic is required")
         ch.topic = c["topic"]
         ch.token = _secret(c, "token", where, required=False)
+    elif ctype == "sms":
+        for k in ("account_sid", "from", "to"):
+            if not c.get(k):
+                raise ConfigError(f"{where}: {k} is required")
+        ch.url = c.get("api_url", "https://api.twilio.com").rstrip("/")
+        ch.account_sid = str(c["account_sid"])
+        ch.token = _secret(c, "auth_token", where)
+        ch.sender = str(c["from"])
+        ch.to = list(c["to"]) if isinstance(c["to"], list) else [c["to"]]
     else:
         for k in ("smtp_host", "sender", "to"):
             if not c.get(k):
@@ -423,7 +634,29 @@ def load_hub_config(path: str) -> HubConfig:
         summary_hour=int(summ.get("hour", 8)),
         summary_enabled=bool(summ.get("enabled", True)),
         retention=_dur(hub, "retention", "400d", "hub"),
+        key_path=str(hub.get("key", "")),
+        operators=_operators(raw.get("operators", [])),
+        announce_gap=_dur(hub, "announce_gap", "10m", "hub"),
     )
     if cfg.silence_critical < cfg.silence_warn:
         raise ConfigError("[heartbeat] critical_after must be >= warn_after")
+    if any(r.announce for r in cfg.rules) and not cfg.key_path:
+        raise ConfigError("rules with announce = true need [hub] key: the hub signs announcements")
     return cfg
+
+
+def _operators(raw: list[dict[str, Any]]) -> list[OperatorConfig]:
+    out = []
+    for i, o in enumerate(raw):
+        where = f"operators[{i}]"
+        if not o.get("name") or not o.get("key"):
+            raise ConfigError(f"{where}: name and key are required")
+        _keys([o["key"]], where)
+        out.append(
+            OperatorConfig(
+                name=str(o["name"]),
+                key=o["key"],
+                sites=_patterns(o.get("sites", ["*"]), f"{where}.sites"),
+            )
+        )
+    return out

@@ -25,6 +25,9 @@ class Notice:
     severity: str  # info | warn | critical
     title: str
     body: str
+    rule: str = ""
+    event: str = ""  # open, escalate, remind or resolve
+    message: str = ""  # the finding alone, without the link
 
 
 def wants(ch: ChannelConfig, severity: str, group: str) -> bool:
@@ -36,11 +39,14 @@ def wants(ch: ChannelConfig, severity: str, group: str) -> bool:
 def queue(db: HubDB, cfg: HubConfig, n: Notice, now: float) -> int:
     queued = 0
     for ch in cfg.channels:
-        if wants(ch, n.severity, n.site.group):
+        if not wants(ch, n.severity, n.site.group):
+            continue
+        # One row per phone number, so a bad number or a retry only affects itself.
+        for target in ch.to if ch.type == "sms" else [""]:
             db.x(
-                "INSERT INTO outbox (channel, created, next_try, severity, title, body) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (ch.name, now, now, n.severity, n.title, n.body),
+                "INSERT INTO outbox (channel, target, created, next_try, severity, title, body) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (ch.name, target, now, now, n.severity, n.title, n.body),
             )
             queued += 1
     return queued
@@ -77,6 +83,9 @@ def _apply(
                         cur.notified_severity,
                         f"Resolved: {site.name}",
                         f"{f.message} (after {human_duration(now - cur.opened)}){_link(cfg, site)}",
+                        f.rule,
+                        "resolve",
+                        f.message,
                     )
                 )
             continue
@@ -92,6 +101,9 @@ def _apply(
                     f.severity,
                     f"{f.severity.upper()}: {site.name}",
                     f.message + _link(cfg, site),
+                    f.rule,
+                    "open",
+                    f.message,
                 )
             )
         elif RANK[f.severity] > RANK[cur.severity]:
@@ -106,6 +118,9 @@ def _apply(
                     f.severity,
                     f"ESCALATED to {f.severity.upper()}: {site.name}",
                     f.message + _link(cfg, site),
+                    f.rule,
+                    "escalate",
+                    f.message,
                 )
             )
         elif (
@@ -123,6 +138,9 @@ def _apply(
                     "critical",
                     f"STILL CRITICAL: {site.name}",
                     f"{f.message} (since {human_duration(now - cur.opened)} ago){_link(cfg, site)}",
+                    f.rule,
+                    "remind",
+                    f.message,
                 )
             )
         else:

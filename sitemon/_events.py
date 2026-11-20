@@ -28,7 +28,8 @@ from cryptography.hazmat.primitives.serialization import (
     PublicFormat,
 )
 
-KINDS = ("reading", "state", "fault", "heartbeat")
+# "command" reports what happened to a signed command (see _commands.py).
+KINDS = ("reading", "state", "fault", "heartbeat", "command")
 
 
 def canonical_json(obj: Any) -> bytes:

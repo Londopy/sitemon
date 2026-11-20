@@ -20,6 +20,8 @@ from typing import Any
 Message = list[tuple[str, str]]
 
 ALLOWED_COMMANDS = frozenset({"rpt show registrations", "iax2 show registry"})
+# Spoken alerts play a file the agent wrote itself; nothing else is played.
+_LOCALPLAY = re.compile(r"rpt localplay \d+ /[A-Za-z0-9_./-]+")
 _ACTIONS = frozenset({"login", "rptstatus", "corestatus", "command"})
 
 
@@ -49,7 +51,7 @@ def _all(msg: Message, key: str) -> list[str]:
     return [v for mk, v in msg if mk.lower() == k]
 
 
-def _refuse_unsafe(name: str, fields: dict[str, str]) -> None:
+def _refuse_unsafe(name: str, fields: dict[str, str], sound_dir: str | None) -> None:
     # Defence in depth on top of the AMI user's permissions.
     if any(c in s for s in (name, *fields, *fields.values()) for c in "\r\n"):
         # A line break would end the header early and smuggle in another one.
@@ -57,13 +59,25 @@ def _refuse_unsafe(name: str, fields: dict[str, str]) -> None:
     if name.lower() not in _ACTIONS:
         raise AmiError(f"refusing to send AMI action {name!r}: sitemon only reads")
     if name.lower() == "command" and (
-        list(fields) != ["Command"] or fields["Command"] not in ALLOWED_COMMANDS
+        list(fields) != ["Command"] or not _allowed_command(fields["Command"], sound_dir)
     ):
         raise AmiError(
             f"refusing to send CLI command {fields.get('Command')!r}: only "
             + " and ".join(repr(c) for c in sorted(ALLOWED_COMMANDS))
             + " are allowed"
         )
+
+
+def _allowed_command(cmd: str, sound_dir: str | None) -> bool:
+    if cmd in ALLOWED_COMMANDS:
+        return True
+    # Only files in the announcement folder, which only the agent writes to.
+    return (
+        sound_dir is not None
+        and _LOCALPLAY.fullmatch(cmd) is not None
+        and ".." not in cmd
+        and cmd.split(" ", 3)[3].startswith(sound_dir.rstrip("/") + "/")
+    )
 
 
 @dataclass
@@ -135,7 +149,16 @@ class AmiClient:
     this needs: ``write = reporting``, plus ``write = command`` only for the
     optional registration check."""
 
-    def __init__(self, host: str, port: int, user: str, secret: str, *, timeout: float = 10.0):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        user: str,
+        secret: str,
+        *,
+        timeout: float = 10.0,
+        sound_dir: str | None = None,
+    ):
         if not _is_loopback(host):
             raise AmiError(f"refusing to connect to AMI on {host}: loopback only")
         self.host, self.port, self.user = host, port, user
@@ -145,6 +168,8 @@ class AmiClient:
         self._writer: asyncio.StreamWriter | None = None
         self._ids = itertools.count(1)
         self._lock = asyncio.Lock()
+        self._connecting = asyncio.Lock()
+        self.sound_dir = sound_dir
 
     @property
     def connected(self) -> bool:
@@ -152,6 +177,12 @@ class AmiClient:
         return self._writer is not None and not self._writer.is_closing()
 
     async def connect(self) -> None:
+        # The AMI poll and an announcement can both find the session down.
+        async with self._connecting:
+            if not self.connected:
+                await self._connect()
+
+    async def _connect(self) -> None:
         self._reader, self._writer = await asyncio.wait_for(
             asyncio.open_connection(self.host, self.port), self.timeout
         )
@@ -213,7 +244,7 @@ class AmiClient:
         return msg
 
     async def _action(self, name: str, **fields: str) -> tuple[Message, str]:
-        _refuse_unsafe(name, fields)  # every request goes through here
+        _refuse_unsafe(name, fields, self.sound_dir)  # every request goes through here
         if self._writer is None:
             raise AmiError("not connected")
         async with self._lock:
@@ -227,6 +258,10 @@ class AmiClient:
                 if _get(msg, "ActionID") == aid:
                     return msg, raw
                 # Some app_rpt builds send events even with events off.
+
+    async def play(self, node: int, path: str) -> None:
+        """Play a sound file (path without its extension) on the node's transmitter."""
+        await self.command(f"rpt localplay {int(node)} {path}")
 
     async def command(self, cmd: str) -> str:
         """Run one of ALLOWED_COMMANDS; returns its text output (both AMI

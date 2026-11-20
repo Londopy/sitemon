@@ -99,7 +99,7 @@ async def test_sample_records_readings_and_states(tmp_path: Path, key: SigningKe
         ("reading", "batt"),
     ]
     door.overrides["open"] = True
-    await ag.switches_once()
+    await ag.fast_once()
     assert recorded(ag)[-1].data == {"open": True}
 
 
@@ -249,8 +249,8 @@ async def test_state_is_resent_when_writing_it_failed(
 
     monkeypatch.setattr(ag.log, "append", flaky)
     with pytest.raises(sqlite3.OperationalError):
-        await ag.switches_once()
-    await ag.switches_once()
+        await ag.fast_once()
+    await ag.fast_once()
     assert [e.data for e in recorded(ag)] == [{"open": True}]
 
 
@@ -472,13 +472,13 @@ async def test_bouncing_door_is_recorded_once(tmp_path: Path, key: SigningKey) -
     ag = Agent(agent_cfg(tmp_path, [], switch_debounce=2.0), key, [door])
     t = [0.0]
     ag.switches = Debouncer(2.0, clock=lambda: t[0])
-    await ag.switches_once()  # shut
+    await ag.fast_once()  # shut
     for i, v in enumerate([True, False, True, True, True]):
         door.overrides["open"] = v
         t[0] = 0.5 * (i + 1)
-        await ag.switches_once()
+        await ag.fast_once()
     t[0] = 4.0
-    await ag.switches_once()
+    await ag.fast_once()
     states = [e.data for e in recorded(ag) if e.kind == "state"]
     assert states == [{"open": False}, {"open": True}]
 
@@ -541,3 +541,29 @@ async def test_sync_loop_survives_an_event_log_error(
     assert len(calls) == 2
     if ag._session:
         await ag._session.close()
+
+
+def test_rf_sensor_is_built_as_fast() -> None:
+    (rf,) = build_sensors([SensorConfig("rf", "rf", {"bus": 99, "coupling_db": 50})])
+    assert isinstance(rf, Deferred) and rf.fast is True
+    (sim_rf,) = build_sensors([SensorConfig("sim-rf", "rf", {})])
+    assert getattr(sim_rf, "fast", False) is True
+
+
+async def test_rf_recorded_while_transmitting_once_per_interval(
+    tmp_path: Path, key: SigningKey
+) -> None:
+    t = [0.0]
+    rf = sim.rf(duty=0.5, clock=lambda: t[0])  # keyed for the first 30 s of each minute
+    ag = Agent(agent_cfg(tmp_path, [], sample_interval=10), key, [rf])
+    ag.announced.add("rf")
+    ag.clock = lambda: t[0]
+    for second in range(60):
+        t[0] = float(second)
+        await ag.fast_once()
+    t[0] = 65.0  # keyed again: a slow loop that read fast sensors would record now
+    await ag.sample_once()
+    readings = [e for e in recorded(ag) if e.kind == "reading"]
+    assert len(readings) == 3  # at 0, 10 and 20 s; unkeyed from 30 s on
+    assert all(1.2 < e.data["swr"] < 1.4 for e in readings)
+    ag.log.close()

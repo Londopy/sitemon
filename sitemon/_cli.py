@@ -1,4 +1,4 @@
-"""Command line: ``sitemon keygen|pubkey|agent|hub|check|summary|demo``."""
+"""Command line: ``sitemon keygen|pubkey|agent|hub|check|summary|command|demo``."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import time
 from collections.abc import Awaitable, Callable
 
 from . import __version__
+from ._commands import Command
 from ._events import SigningKey
 from .config import (
     AgentConfig,
@@ -118,6 +119,40 @@ def cmd_check(a: argparse.Namespace) -> int:
             print(f"{path}: {e}", file=sys.stderr)
             return 1
     return 0
+
+
+async def _send_command(hub: str, cmd: Command, wait: float) -> tuple[str, str]:
+    """Queue ``cmd`` on the hub; with ``wait``, poll until the site reports back."""
+    import aiohttp
+
+    base = hub.rstrip("/")
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(f"{base}/api/commands", json=cmd.to_dict()) as r:
+            if r.status != 202:
+                return "refused by hub", (await r.text())[:300]
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            await asyncio.sleep(3)
+            async with session.get(f"{base}/api/commands/{cmd.nonce}") as r:
+                st = await r.json() if r.status == 200 else {}
+            if st.get("status") in ("done", "refused", "expired"):
+                return str(st["status"]), str(st.get("detail", ""))
+    return "queued", "no answer from the site yet; it collects commands when it next syncs"
+
+
+def cmd_command(a: argparse.Namespace) -> int:
+    args: dict[str, object] = {"relay": a.relay, "action": a.action}
+    if a.seconds is not None:
+        args["seconds"] = a.seconds
+    cmd = Command.create(a.site, "relay", args).signed(SigningKey.load(a.key))
+    try:
+        status, detail = asyncio.run(_send_command(a.hub, cmd, a.wait))
+    except OSError as e:
+        print(f"cannot reach {a.hub}: {e}", file=sys.stderr)
+        return 1
+    print(f"{status}: {detail}" if detail else status)
+    return 0 if status in ("done", "queued") else 1
 
 
 def cmd_summary(a: argparse.Namespace) -> int:
@@ -257,6 +292,15 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("summary", help="print the weekly summary now")
     s.add_argument("--config", default="/etc/sitemon/hub.toml")
     s.set_defaults(fn=cmd_summary)
+    s = sub.add_parser("command", help="send a signed relay command to a site through a hub")
+    s.add_argument("site")
+    s.add_argument("relay")
+    s.add_argument("action", choices=["pulse", "on", "off"])
+    s.add_argument("--seconds", type=float, help="shorter than the relay's own limit")
+    s.add_argument("--hub", required=True, help="a hub the site takes commands from")
+    s.add_argument("--key", required=True, help="your operator key (sitemon keygen)")
+    s.add_argument("--wait", type=float, default=90, help="seconds to wait for the result")
+    s.set_defaults(fn=cmd_command)
     s = sub.add_parser("demo", help="run a hub with three simulated sites on this machine")
     s.add_argument("--port", type=int, default=8470)
     s.add_argument("--ntfy-topic", help="also push demo alerts to this ntfy.sh topic")

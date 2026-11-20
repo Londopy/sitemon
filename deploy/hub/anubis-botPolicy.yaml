@@ -7,6 +7,11 @@ bots:
   - name: sitemon-ingest
     path_regex: ^/api/ingest$
     action: ALLOW
+  # Signed relay commands from `sitemon command`, sites collecting them, and
+  # the command's status. All signed or keyed by a random nonce.
+  - name: sitemon-commands
+    path_regex: ^/api/commands(/poll|/[0-9a-f]{32})?$
+    action: ALLOW
   # Uptime checks.
   - name: sitemon-health
     path_regex: ^/healthz$

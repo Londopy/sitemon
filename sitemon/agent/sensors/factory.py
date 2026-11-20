@@ -18,10 +18,15 @@ class Deferred:
     """
 
     def __init__(
-        self, name: str, kind: Literal["reading", "state"], ctor: Callable[[], Sensor]
+        self,
+        name: str,
+        kind: Literal["reading", "state"],
+        ctor: Callable[[], Sensor],
+        fast: bool = False,
     ) -> None:
         self.name = name
         self.kind: Literal["reading", "state"] = kind
+        self.fast = fast
         self._ctor = ctor
         self._inner: Sensor | None = None
 
@@ -103,6 +108,33 @@ def build_sensors(configs: list[SensorConfig]) -> list[Sensor]:
                     return GPIOInput(nm, k, p, active_when=a, pull=pl)
 
                 out.append(Deferred(sc.name, "state", gpio))
+            elif sc.type == "rf":
+                from .ads1115 import ADS1115
+                from .rf import RFPower
+
+                n, addr = _int(o, "bus", 1), _int(o, "address", 0x48)
+                rf_opts: dict[str, Any] = {
+                    k: int(o[k]) for k in ("forward_channel", "reflected_channel") if k in o
+                }
+                for k in ("slope_mv_per_db", "intercept_dbm", "coupling_db", "min_forward_w"):
+                    if k in o:
+                        rf_opts[k] = float(o[k])
+
+                def rf(
+                    nm: str = sc.name, n: int = n, a: int = addr, kw: dict[str, Any] = rf_opts
+                ) -> Sensor:
+                    return RFPower(nm, ADS1115(bus(n), a), **kw)
+
+                out.append(Deferred(sc.name, "reading", rf, fast=True))
+            elif sc.type == "sim-rf":
+                out.append(
+                    sim.rf(
+                        sc.name,
+                        forward_w=float(o.get("forward_w", 50.0)),
+                        swr=float(o.get("swr", 1.3)),
+                        duty=float(o.get("duty", 0.3)),
+                    )
+                )
             elif sc.type == "sim-battery":
                 out.append(
                     sim.battery(
@@ -121,8 +153,8 @@ def build_sensors(configs: list[SensorConfig]) -> list[Sensor]:
                 )
             else:
                 raise ConfigError(
-                    "unknown type (ina226, ina219, bme280, gpio, sim-battery, "
-                    "sim-environment, sim-switch)"
+                    "unknown type (ina226, ina219, bme280, rf, gpio, sim-battery, "
+                    "sim-environment, sim-switch, sim-rf)"
                 )
         except ConfigError as e:
             raise ConfigError(f"{where}: {e}") from e

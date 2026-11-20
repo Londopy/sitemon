@@ -9,6 +9,8 @@ public_url = "https://sitemon.example.org"   # used for links in alerts; "" to l
 group = "sites"                               # default group for sites that don't name one
 remind_critical = "12h"                       # repeat a critical alert this often while it lasts
 retention = "400d"                            # keep a year of history plus a margin
+# key = "/etc/sitemon/hub.key"                # signs spoken alerts; needed for announce = true
+# announce_gap = "10m"                        # at most one spoken alert per site this often
 
 # Each group gets its own dashboard page and weekly summary.
 [groups]
@@ -80,6 +82,28 @@ type = "state"
 metric = "water.present"
 bad = true
 severity = "critical"
+# announce = true    # say it on the repeater too (deploy/README.md section 9)
+
+# With the RF sensor (deploy/README.md section 8):
+# [[rules]]
+# name = "High SWR"
+# metric = "rf.swr"
+# above = 2.0
+# critical_above = 3.0
+# hold = "2m"
+#
+# [[rules]]
+# name = "SWR creeping up"
+# type = "rate"
+# metric = "rf.swr"
+# window = "7d"
+# rise = 0.3
+
+# People who may send relay commands (`sitemon command`), and to which sites.
+# [[operators]]
+# name = "trustee"
+# key = "OPERATOR-PUBLIC-KEY"
+# sites = ["*"]
 
 # Only does anything if the agent has registration_command set (see agent.example.toml).
 [[rules]]
@@ -122,6 +146,15 @@ min_severity = "critical"
 # sender = "sitemon@example.org"
 # to = ["trustee@example.org"]
 # min_severity = "warn"
+
+# [[channels]]
+# type = "sms"                        # through Twilio
+# name = "sms"
+# account_sid = "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+# auth_token_env = "SITEMON_TWILIO_TOKEN"
+# from = "+15550000000"
+# to = ["+15550000001"]
+# min_severity = "critical"
 
 # Weekly summary to Discord
 [summary]

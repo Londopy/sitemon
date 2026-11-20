@@ -28,10 +28,15 @@ Dashboard: http://127.0.0.1:8470  (data in /tmp/sitemon-demo-1a2b; Ctrl+C to sto
 - **AllStar:** keyed state, linked nodes and uptime over AMI, on localhost only, with an AMI user
   that can query status and nothing else. Registration status is an opt-in extra.
 - **AREDN:** node reachability, firmware, links and RF links from the local node.
+- **RF:** forward and reflected power and SWR while transmitting, from a directional coupler and
+  two AD8307 detectors, so a failing antenna or feedline shows up as a trend.
+- **Relays:** power-cycle a hung radio or node, or switch shack lights, with commands signed by
+  your own key. Every relay has a time limit, and a hardware cutoff drops them if the Pi hangs.
 - **Rules:** thresholds with hysteresis, slow trends ("battery fell 0.3 V in a week"), state
   changes, sensor faults, and silent sites.
-- **Alerts:** one message when something breaks, one when it escalates, one when it's fixed.
-  Queued and retried when the hub's internet path is down.
+- **Alerts:** one message when something breaks, one when it escalates, one when it's fixed,
+  by Discord, ntfy, email or SMS. Queued and retried when the hub's internet path is down.
+  Optionally spoken on the repeater itself.
 - **Dashboard:** a tile per site with sparklines, a plain-language status, a page per site with
   7-day charts and alert history, and CSV export for every sensor. Weekly summary to Discord.
 - **Built for transmitter sites:** I2C error recovery, chips re-initialised after RF-induced
@@ -126,13 +131,13 @@ sitemon doesn't replace Allmon3; run both. It reads AMI the same way, read-only.
 
 ## What it will not do
 
-- **Control the repeater.** sitemon is a monitor. Relay outputs (remote reboot, planned) will be
-  signed, time-limited and watchdogged, and won't be offered over amateur RF links without a
-  proper auxiliary station (47 CFR 97.213).
+- **Replace the repeater controller.** Relays power-cycle equipment and switch accessories; they
+  don't key the transmitter or change its settings. Commands only travel over wireline paths
+  (internet, cellular), never the mesh, unless you run a proper auxiliary station (47 CFR 97.213).
 - **Encrypt data over the mesh.** Part 97 doesn't allow it. Everything is signed instead, so the
   hub can tell a real reading from a forged one.
-- **Measure RF power precisely.** Forward and reflected trend alarms are planned; calibrated
-  absolute power is not.
+- **Measure RF power precisely.** Forward and reflected power are tracked for trends; it isn't a
+  calibrated wattmeter.
 
 ## How it works
 
@@ -172,18 +177,22 @@ No hardware needed: the tests use simulated sensors and a fake AMI server.
 ```
 sitemon/
   _events.py        # events, Ed25519 signing, upload envelope
+  _commands.py      # signed commands: relays and spoken alerts
   config.py         # agent and hub TOML
   agent/
     runtime.py      # sampling loops, heartbeat, sync, local status page
     store.py        # SQLite event queue, never-repeating sequence numbers
-    ami.py          # read-only AMI client (loopback only)
+    ami.py          # AMI client (loopback only, allow-listed requests)
+    relays.py       # relay outputs and the keep-alive pin
+    announce.py     # spoken alerts: text to speech, rpt localplay
     aredn.py        # AREDN sysinfo
-    sensors/        # INA226/219, BME280, GPIO, I2C recovery, simulated sensors
+    sensors/        # INA226/219, BME280, RF (ADS1115), GPIO, I2C recovery, simulated sensors
   hub/
     ingest.py       # signature checks, de-duplication, time placement
     rules.py        # thresholds, trends, states, faults, silence
     alerts.py       # de-duplication, escalation, outbox
-    channels.py     # Discord, ntfy, email
+    channels.py     # Discord, ntfy, email, SMS
+    commands.py     # queue of signed commands waiting for their site
     server.py       # HTTP API, dashboard, CSV, background loops
     static/         # dashboard (plain HTML/JS/CSS)
 deploy/             # example configs, systemd units, hub Docker + Anubis
