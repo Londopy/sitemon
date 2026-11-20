@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sitemon"
-version = "0.3.0"
+version = "0.4.0"
 description = "Power, environment, door, AllStar and AREDN monitoring for repeater sites."
 readme = "README.md"
 license = "MIT"
