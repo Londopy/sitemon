@@ -8,6 +8,8 @@ what appears on its GitHub release page. Validated in CI by
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-19
+
 ### Added
 
 - The site page charts 7, 30, 90 or 365 days, and lists recent relay commands and announcements.
@@ -46,6 +48,7 @@ what appears on its GitHub release page. Validated in CI by
   summary to Discord.
 - Dashboard with a tile and sparklines per site, and CSV export per sensor.
 
-[Unreleased]: https://github.com/Londopy/sitemon/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Londopy/sitemon/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Londopy/sitemon/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Londopy/sitemon/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Londopy/sitemon/releases/tag/v0.1.0
