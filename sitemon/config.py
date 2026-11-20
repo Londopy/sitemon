@@ -183,10 +183,22 @@ def _pin(v: Any, where: str) -> int:
     return v
 
 
-def _limit(d: dict[str, Any], key: str, default: str, where: str) -> float:
+# A station under remote control must stop transmitting within 3 minutes if
+# the control link fails (47 CFR 97.213). The relay loop ticks once a second
+# and can stall, so leave some margin.
+TX_LIMIT = 170.0
+RELAY_KEYS = {"name", "pin", "mode", "active_low", "pulse", "max_on", "transmitter"}
+
+
+def _limit(d: dict[str, Any], key: str, default: str, where: str, transmitter: bool) -> float:
     v = _dur(d, key, default, where)
     if not 0 < v <= 86400:
         raise ConfigError(f"{where}.{key}: more than 0 and at most a day")
+    if transmitter and v > TX_LIMIT:
+        raise ConfigError(
+            f"{where}.{key}: a relay that can make the station transmit is limited to "
+            f"{TX_LIMIT:g} s, under the 3 minutes of 47 CFR 97.213"
+        )
     return v
 
 
@@ -196,6 +208,11 @@ def _control_hub(url: str) -> None:
     from urllib.parse import urlsplit
 
     u = urlsplit(url)
+    if u.hostname is not None and u.hostname.rstrip(".").endswith(".mesh"):
+        raise ConfigError(
+            f"[control] hubs: {url!r} is on the AREDN mesh; list a hub the site reaches over "
+            "the internet or cellular (47 CFR 97.213)"
+        )
     if u.scheme == "https":
         return
     if u.scheme == "http" and u.hostname is not None:
@@ -240,6 +257,13 @@ def _relays(raw: list[dict[str, Any]], taken: set[int]) -> list[RelayConfig]:
         mode = r.get("mode", "pulse")
         if mode not in ("pulse", "switch"):
             raise ConfigError(f"{where}: mode must be pulse or switch")
+        # A typo in "transmitter" must not quietly drop its limit.
+        unknown = sorted(set(r) - RELAY_KEYS)
+        if unknown:
+            raise ConfigError(f"{where}: unknown setting {unknown[0]!r}")
+        tx = r.get("transmitter", False)
+        if not isinstance(tx, bool):
+            raise ConfigError(f"{where}.transmitter: true or false")
         names.add(name)
         taken.add(pin)
         out.append(
@@ -248,8 +272,8 @@ def _relays(raw: list[dict[str, Any]], taken: set[int]) -> list[RelayConfig]:
                 pin=pin,
                 mode=mode,
                 active_low=bool(r.get("active_low", True)),
-                pulse=_limit(r, "pulse", "10s", where),
-                max_on=_limit(r, "max_on", "1h", where),
+                pulse=_limit(r, "pulse", "10s", where, tx and mode == "pulse"),
+                max_on=_limit(r, "max_on", "2m" if tx else "1h", where, tx and mode == "switch"),
             )
         )
     return out

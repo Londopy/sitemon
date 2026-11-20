@@ -85,9 +85,9 @@ sudo chmod 600 /etc/sitemon/agent.env
 **Optional: the registration check.** Whether the node is registered with AllStarLink is only
 available as a CLI command, and AMI only runs CLI commands for users with `write = command`.
 That permission is not read-only: it allows *any* CLI command, including ones that stop
-Asterisk or key the transmitter. sitemon itself only ever sends `rpt show registrations` or
-`iax2 show registry` (anything else is refused in code), but the password then unlocks more than
-monitoring. If you want the check anyway, make it `write = reporting,command` above and set
+Asterisk or key the transmitter. For this check sitemon only ever sends `rpt show registrations`
+or `iax2 show registry` (and `rpt localplay` if you turn on spoken alerts, section 9; anything
+else is refused in code), but the password then unlocks more than monitoring. If you want the check anyway, make it `write = reporting,command` above and set
 `registration_command` in agent.toml to whichever of the two your node answers (ASL3 registers
 over HTTP: `sudo asterisk -rx "rpt show registrations"`; older builds use `iax2 show registry`).
 
@@ -167,19 +167,38 @@ your own computer. Each relay has a mode and a time limit, and starts off:
 
 **Hardware cutoff.** Software limits aren't enough on their own: if the Pi hangs with a relay
 energised, it stays energised. Set `watchdog_pin` and the agent toggles it every second while it's
-healthy. Feed it to a retriggerable monostable (a 74HC123, or a 555 in missing-pulse mode) with
-a period of about 3 s, and let its output switch the relay board's supply through a transistor or
-MOSFET. If the toggling stops, the relays lose power within about 3 seconds.
+healthy. One cutoff covers every relay output, because it switches the supply of the whole relay
+board:
+
+- Watchdog pin into the rising-edge trigger input of a retriggerable monostable: half of a
+  74HC123, run from 3.3 V, with the unused half's inputs and the reset tied to fixed levels. The
+  pin flips every second, so a rising edge comes every 2 s; set the period to about 3 s with the
+  timing resistor and capacitor (from the datasheet formula; a film or other low-leakage
+  capacitor, since the charge current is tiny).
+- The monostable's output drives an N-channel MOSFET rated for 3.3 V gate drive, in the ground
+  lead of the relay board's coil supply. On the usual opto-isolated boards that is JD-VCC, with
+  the VCC/JD-VCC jumper removed so the coils don't also run from the Pi's 5 V.
+- If the agent hangs, the Pi crashes or the pin stops toggling for any other reason, the output
+  drops within about 3 s and every relay releases, whatever its GPIO pin is doing.
+
+Before trusting it, check it on the bench: with a relay on, freeze the agent with
+`sudo kill -STOP <its PID>` (from `systemctl show -p MainPID sitemon-agent`) and the relay should
+release within about 3 s; `kill -CONT` lets it carry on. Stopping the service isn't a test,
+because the agent switches its relays off itself on the way out. This circuit hasn't been built
+and measured as part of sitemon yet.
 
 **Part 97.** Switching a radio or node is remote control of the station (47 CFR 97.213). The
 control link must be wireline (internet, cellular) unless you run a proper auxiliary station on
 2 m or up (97.201). So:
 
-- List only hubs reached over the internet or cellular under `[control] hubs`, by https (sitemon
-  refuses plain http unless the hub is on the Pi itself). Never list a hub that the site only
-  reaches over the AREDN mesh.
-- Keep `pulse` and `max_on` short for anything that powers a transmitter, and the cutoff circuit
-  in place.
+- List only hubs reached over the internet or cellular under `[control] hubs`, by https. sitemon
+  refuses plain http unless the hub is on the Pi itself, and refuses AREDN names
+  (`*.local.mesh`). It can't tell which path a bare name (which a mesh node may complete to
+  `.local.mesh`), a 10.x address or any other https address takes, though, so never list a hub
+  that the site reaches over the mesh.
+- Mark any relay that can make the station transmit with `transmitter = true`. Its `pulse` (or
+  `max_on` for a switch) is then held to 170 s, and `max_on` defaults to 2 minutes, inside the
+  3 minutes 97.213 allows after the control link fails. Keep the cutoff circuit in place too.
 
 **Operator keys.** Each person who may send commands makes their own key, on their own computer:
 
@@ -213,7 +232,8 @@ slowly getting worse shows up as a trend weeks before it fails.
   the coupler's coupling factor and the attenuators together as `coupling_db`.
 - Calibrate against a wattmeter: transmit at two known powers, read `rf` on the site's status page,
   and adjust `slope_mv_per_db` and `intercept_dbm` until they agree. It's a trend monitor, so
-  close is good enough.
+  close is good enough. How close it gets, and how SWR readings compare with a real meter, hasn't
+  been measured yet; treat early numbers with care.
 - Rules like `SWR above 2` (with a `hold`) and `SWR rose 0.3 in 7 days` are in
   [hub.example.toml](hub.example.toml).
 

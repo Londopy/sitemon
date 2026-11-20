@@ -26,7 +26,8 @@ Dashboard: http://127.0.0.1:8470  (data in /tmp/sitemon-demo-1a2b; Ctrl+C to sto
 - **Environment:** temperature, humidity and pressure via BME280.
 - **Door and water:** any reed switch or float switch on a GPIO pin.
 - **AllStar:** keyed state, linked nodes and uptime over AMI, on localhost only, with an AMI user
-  that can query status and nothing else. Registration status is an opt-in extra.
+  that can query status and nothing else. Registration status and spoken alerts are opt-in
+  extras, and they need an AMI permission that allows any CLI command (see deploy/README.md).
 - **AREDN:** node reachability, firmware, links and RF links from the local node.
 - **RF:** forward and reflected power and SWR while transmitting, from a directional coupler and
   two AD8307 detectors, so a failing antenna or feedline shows up as a trend.
@@ -121,11 +122,11 @@ unit = "V"
 
 | | Allmon3 / Supermon | PacketFlux / NetGuardian | sitemon |
 |---|---|---|---|
-| AllStar link and keyed state | ✅ | ❌ | ✅ |
-| Site power, temperature, door | ❌ | ✅ | ✅ |
-| Every site on one page | ❌ | via your NMS | ✅ |
-| Alerts when a site goes silent | ❌ | via your NMS | ✅ |
-| Keeps readings through a link outage | ❌ | ❌ | ✅ |
+| AllStar link and keyed state | yes | no | yes |
+| Site power, temperature, door | no | yes | yes |
+| Every site on one page | no | via your NMS | yes |
+| Alerts when a site goes silent | no | via your NMS | yes |
+| Keeps readings through a link outage | no | no | yes |
 | Cost per site, excluding the Pi | free | $130+ | about $40-80 in parts |
 
 sitemon doesn't replace Allmon3; run both. It reads AMI the same way, read-only.
@@ -133,12 +134,26 @@ sitemon doesn't replace Allmon3; run both. It reads AMI the same way, read-only.
 ## What it will not do
 
 - **Replace the repeater controller.** Relays power-cycle equipment and switch accessories; they
-  don't key the transmitter or change its settings. Commands only travel over wireline paths
-  (internet, cellular), never the mesh, unless you run a proper auxiliary station (47 CFR 97.213).
-- **Encrypt data over the mesh.** Part 97 doesn't allow it. Everything is signed instead, so the
-  hub can tell a real reading from a forged one.
+  don't key the transmitter or change its settings. Remote control has to come over a wireline
+  path (internet, cellular) unless you run a proper auxiliary station (47 CFR 97.213). sitemon
+  refuses control hubs with AREDN names (`*.local.mesh`) and plain HTTP, but it can't see which
+  path a bare name, a 10.x address or any other https address takes, so listing only wireline
+  hubs is up to you. A relay marked `transmitter = true` is held to 170 s, inside the 3 minutes
+  97.213 sets for a failed control link.
+- **Encrypt data over the mesh.** 47 CFR 97.113(a)(4) bars messages encoded to obscure their
+  meaning, and the common reading is that this rules out encrypting terrestrial amateur traffic
+  (an interpretation, not an FCC ruling). Everything is signed instead, so the hub can tell a real
+  reading from a forged one.
 - **Measure RF power precisely.** Forward and reflected power are tracked for trends; it isn't a
-  calibrated wattmeter.
+  calibrated wattmeter, and its accuracy against one hasn't been measured yet.
+
+## Status
+
+Everything is tested in software, against simulated sensors, a fake AMI server and hand-written
+AREDN replies. None of it has run at a real site yet. In particular these haven't been checked on
+hardware: the INA, BME280 and ADS1115 drivers on a real I2C bus, the relays and the hardware
+cutoff circuit, the RF readings against a wattmeter, spoken alerts through a real ASL3 node, and
+a real AREDN node's sysinfo. Reports from a first install are welcome as issues.
 
 ## How it works
 
@@ -206,4 +221,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). The short version: it's a monitor, not a
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).

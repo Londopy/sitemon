@@ -911,6 +911,25 @@ def test_old_hub_database_gets_the_new_column(tmp_path: Path) -> None:
             'hubs=["http://hub"]\n[control]\nhubs=["http://hub"]',
             "must be https",
         ),
+        (
+            'hubs=["https://hub"]\n[control]\nhubs=["https://hub"]',
+            'hubs=["https://hub.local.mesh"]\n[control]\nhubs=["https://hub.local.mesh"]',
+            "on the AREDN mesh",
+        ),
+        (
+            'hubs=["https://hub"]\n[control]\nhubs=["https://hub"]',
+            'hubs=["Https://Hub.Local.Mesh.:8443/"]\n[control]\nhubs=["Https://Hub.Local.Mesh.:8443/"]',
+            "on the AREDN mesh",
+        ),
+        (
+            'hubs=["https://hub"]\n[control]\nhubs=["https://hub"]',
+            'hubs=["https://hub.mesh"]\n[control]\nhubs=["https://hub.mesh"]',
+            "on the AREDN mesh",
+        ),
+        ('pulse="20s"', 'pulse="171s"\ntransmitter=true', "limited to 170 s"),
+        ('pulse="20s"', 'pulse="0s"\ntransmitter=true', "more than 0"),
+        ('pulse="20s"', 'pulse="20s"\ntransmitter="yes"', "true or false"),
+        ('pulse="20s"', 'pulse="20s"\ntransmiter=true', "unknown setting 'transmiter'"),
     ],
 )
 def test_control_config_limits(tmp_path: Path, old: str, new: str, msg: str) -> None:
@@ -923,6 +942,28 @@ def test_control_config_limits(tmp_path: Path, old: str, new: str, msg: str) -> 
     load_agent_config(write(tmp_path, base))
     with pytest.raises(ConfigError, match=msg):
         load_agent_config(write(tmp_path, base.replace(old, new)))
+
+
+def test_transmitter_relay_limits(tmp_path: Path) -> None:
+    op = SigningKey.generate().public_key().to_b64()
+    text = (
+        f'[site]\nid="s"\nkey="k"\n[agent]\nhubs=["https://hub"]\n'
+        f'[control]\nhubs=["https://hub"]\noperators=["{op}"]\n'
+        '[[relays]]\nname="tx"\npin=5\nmode="switch"\ntransmitter=true\n'
+        '[[relays]]\nname="lights"\npin=6\nmode="switch"\n'
+    )
+    tx, lights = load_agent_config(write(tmp_path, text)).relays
+    assert tx.max_on == 120 and lights.max_on == 3600
+    for limit in ('max_on="170s"', 'max_on="171s"'):
+        relay = text.replace("transmitter=true\n", f"transmitter=true\n{limit}\n")
+        if limit.endswith('171s"'):
+            with pytest.raises(ConfigError, match="limited to 170 s"):
+                load_agent_config(write(tmp_path, relay))
+        else:
+            assert load_agent_config(write(tmp_path, relay)).relays[0].max_on == 170
+    # pulse doesn't apply to a switch relay, so it isn't held to the limit
+    relay = text.replace("transmitter=true\n", 'transmitter=true\npulse="5m"\n')
+    assert load_agent_config(write(tmp_path, relay)).relays[0].max_on == 120
 
 
 def test_loopback_control_hub_may_be_http(tmp_path: Path) -> None:
