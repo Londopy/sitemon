@@ -8,6 +8,19 @@ what appears on its GitHub release page. Validated in CI by
 
 ## [Unreleased]
 
+### Added
+
+- `transmitter = true` on a relay that can make the station transmit holds it to 170 s, inside
+  the 3 minutes 47 CFR 97.213 sets for a failed control link.
+
+### Changed
+
+- Control hubs with AREDN names (`*.local.mesh`) are refused, since remote control must not come
+  over the mesh. An agent config that lists one now fails `sitemon check` and won't start.
+- Unknown settings on a relay are refused, so a misspelt `transmitter` can't drop its limit.
+- The deploy guide describes the relay cutoff circuit, and the README says which parts haven't
+  run on real hardware yet.
+
 ## [0.3.0] - 2026-11-19
 
 ### Added

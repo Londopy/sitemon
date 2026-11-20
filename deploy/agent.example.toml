@@ -113,6 +113,12 @@ interval = "60s"
 # mode = "switch"                      # on and off on command, never on longer than max_on
 # max_on = "2h"
 
+# [[relays]]
+# name = "tx"
+# pin = 13
+# mode = "switch"
+# transmitter = true                   # can make the station transmit: held to 170 s
+
 # Spoken alerts on the repeater (deploy/README.md section 9). Needs [ami] and [control] hub_keys.
 # [announce]
 # enabled = true
