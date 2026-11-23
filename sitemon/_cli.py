@@ -1,4 +1,4 @@
-"""Command line: ``sitemon keygen|pubkey|agent|hub|check|summary|command|demo``."""
+"""Command line: ``sitemon keygen|pubkey|agent|hub|check|summary|command|tui|demo``."""
 
 from __future__ import annotations
 
@@ -142,6 +142,20 @@ def cmd_command(a: argparse.Namespace) -> int:
         return 1
     print(f"{status}: {detail}" if detail else status)
     return 0 if status in ("done", "queued") else 1
+
+
+def cmd_tui(a: argparse.Namespace) -> int:
+    try:
+        from .tui import AgentApp, HubApp
+    except ImportError as e:
+        raise SystemExit(f"the TUI needs Textual: pip install 'sitemon[tui]' ({e})") from e
+    if a.hub:
+        HubApp(a.hub, SigningKey.load(a.key) if a.key else None).run()
+    elif a.key:
+        raise SystemExit("--key is for sending commands through a hub; add --hub")
+    else:
+        AgentApp(a.agent).run()
+    return 0
 
 
 def cmd_summary(a: argparse.Namespace) -> int:
@@ -292,6 +306,11 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--key", required=True, help="your operator key (sitemon keygen)")
     s.add_argument("--wait", type=float, default=90, help="seconds to wait for the result")
     s.set_defaults(fn=cmd_command)
+    s = sub.add_parser("tui", help="terminal dashboard for a hub, or for the agent on this Pi")
+    s.add_argument("--hub", help="hub URL; without it, shows the agent on this machine")
+    s.add_argument("--agent", default="http://127.0.0.1:8471", help="the agent's local_ui address")
+    s.add_argument("--key", help="your operator key, to send relay commands (with --hub)")
+    s.set_defaults(fn=cmd_tui)
     s = sub.add_parser("demo", help="run a hub with three simulated sites on this machine")
     s.add_argument("--port", type=int, default=8470)
     s.add_argument("--ntfy-topic", help="also push demo alerts to this ntfy.sh topic")

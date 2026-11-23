@@ -38,8 +38,10 @@ dependencies = [
 [project.optional-dependencies]
 # Real hardware only. Without these the agent still runs with simulated sensors.
 pi = ["smbus2>=0.4", "gpiozero>=2.0"]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "hypothesis>=6", "ruff>=0.5", "mypy>=1.10"]
-all = ["sitemon[pi,dev]"]
+# The terminal dashboard, `sitemon tui`.
+tui = ["textual>=8.2"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "hypothesis>=6", "ruff>=0.5", "mypy>=1.10", "textual>=8.2"]
+all = ["sitemon[pi,tui,dev]"]
 
 [project.urls]
 Homepage = "https://github.com/Londopy/sitemon"
