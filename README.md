@@ -52,7 +52,7 @@ minute, so you can watch the silence alarm fire.
 
 ## Features
 
-| | |
+| What | How |
 |---|---|
 | 🔋 **Power** | Battery, solar and PSU rails via INA226 (or INA219 for lower voltage). |
 | 🌡️ **Environment** | Temperature, humidity and pressure via BME280. |
