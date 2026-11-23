@@ -13,6 +13,15 @@ what appears on its GitHub release page. Validated in CI by
 - `sitemon tui`, a terminal dashboard for checking things over SSH: every site on a hub with its
   readings, sparklines, alerts and relays, relay commands confirmed before they go, or the agent's
   own health on a site Pi. It needs the new `tui` extra (Textual).
+- `watchdog_pin` on a relay: a cutoff of its own, toggled only while that relay is meant to be on.
+
+### Changed
+
+- Every relay is held to 170 s unless it's marked `transmitter = false`, so a relay nobody thought
+  about can't keep a station transmitting. A config with a longer `pulse` or `max_on` and no
+  `transmitter = false` now fails `sitemon check`.
+- Control hubs given by a bare name or a 10.x address are refused, as `*.mesh` names already
+  were, and command polls never connect to a 10.x address whatever a name resolves to.
 
 ## [0.4.0] - 2026-11-19
 
