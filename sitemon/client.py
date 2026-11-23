@@ -38,8 +38,11 @@ async def send_command(
     deadline = time.monotonic() + wait
     while time.monotonic() < deadline:
         await asyncio.sleep(poll)
-        async with session.get(f"{base}/api/commands/{cmd.nonce}", timeout=TIMEOUT) as r:
-            st = await r.json() if r.status == 200 else {}
-        if st.get("status") in ("done", "refused", "expired"):
+        try:
+            async with session.get(f"{base}/api/commands/{cmd.nonce}", timeout=TIMEOUT) as r:
+                st = await r.json() if r.status == 200 else {}
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+            continue
+        if isinstance(st, dict) and st.get("status") in ("done", "refused", "expired"):
             return str(st["status"]), str(st.get("detail", ""))
     return "queued", "no answer from the site yet; it collects commands when it next syncs"

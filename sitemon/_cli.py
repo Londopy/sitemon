@@ -149,13 +149,14 @@ def cmd_tui(a: argparse.Namespace) -> int:
         from .tui import AgentApp, HubApp
     except ImportError as e:
         raise SystemExit(f"the TUI needs Textual: pip install 'sitemon[tui]' ({e})") from e
-    if a.hub:
-        HubApp(a.hub, SigningKey.load(a.key) if a.key else None).run()
+    if a.hub is not None:
+        app: HubApp | AgentApp = HubApp(a.hub, SigningKey.load(a.key) if a.key else None)
     elif a.key:
         raise SystemExit("--key is for sending commands through a hub; add --hub")
     else:
-        AgentApp(a.agent).run()
-    return 0
+        app = AgentApp(a.agent)
+    app.run()
+    return app.return_code or 0
 
 
 def cmd_summary(a: argparse.Namespace) -> int:

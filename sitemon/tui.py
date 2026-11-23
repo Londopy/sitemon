@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import math
 import os
+import re
 import time
 from collections.abc import Mapping
 from typing import Any, ClassVar
@@ -18,6 +19,7 @@ from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widget import Widget
+from textual.worker import Worker
 from textual.widgets import Button, DataTable, Footer, Input, Label, Sparkline, Static
 
 from ._commands import Command
@@ -45,6 +47,7 @@ STATUS_WORDS = {"critical": "CRITICAL", "silent": "NO CONTACT", "warn": "WARN", 
 WORST_FIRST = {"critical": 0, "silent": 1, "warn": 2, "ok": 3}
 HUB_REFRESH = 15.0
 AGENT_REFRESH = 5.0
+_CONTROLS = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]")
 
 CSS = """
 Screen { background: ansi_default; }
@@ -58,8 +61,8 @@ DataTable { height: auto; max-height: 24; margin: 0 1; }
 #sites { height: 1fr; max-height: 100%; }
 .chart { height: 1; margin: 0 1; }
 .chart .name { width: 24; }
-.chart Sparkline { width: 1fr; }
-.chart .val { width: 34; padding-left: 2; }
+.chart Sparkline { width: 1fr; min-width: 10; }
+.chart .val { width: auto; padding-left: 2; }
 #dialog { width: 64; height: auto; padding: 1 2; border: round $primary; background: ansi_default; }
 #dialog Input { margin: 1 0 0 0; }
 #dialog Horizontal { height: auto; margin-top: 1; }
@@ -67,6 +70,11 @@ DataTable { height: auto; max-height: 24; margin: 0 1; }
 #result { margin-top: 1; }
 ConfirmCommand { align: center middle; }
 """
+
+
+def plain(s: object) -> Text:
+    """Text from a hub, a site or an error, shown as it is: no markup, no escape sequences."""
+    return Text(_CONTROLS.sub("", str(s)))
 
 
 def label(metric: str) -> str:
@@ -115,11 +123,16 @@ def theme_for(env: Mapping[str, str]) -> str:
     return "ansi-light" if bg in ("7", "15") else "ansi-dark"
 
 
-def first(latest: Mapping[str, Any], key: str) -> str:
-    for metric, info in sorted(latest.items()):
-        if metric.endswith("." + key) and isinstance(info.get("value"), (int, float)):
-            return fmt(info["value"], metric)
-    return ""
+def readings(latest: Mapping[str, Any], key: str) -> str:
+    """Every source's ``key`` reading, named by source when there's more than one."""
+    found = [
+        (metric.partition(".")[0], fmt(info["value"], metric))
+        for metric, info in sorted(latest.items())
+        if metric.endswith("." + key) and isinstance(info.get("value"), (int, float))
+    ]
+    if len(found) == 1:
+        return found[0][1]
+    return "  ".join(f"{src} {val}" for src, val in found)
 
 
 def fill(table: DataTable[Any], rows: list[tuple[str, list[Any]]]) -> None:
@@ -129,7 +142,7 @@ def fill(table: DataTable[Any], rows: list[tuple[str, list[Any]]]) -> None:
         keep = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
     table.clear()
     for key, cells in rows:
-        table.add_row(*cells, key=key)
+        table.add_row(*(plain(c) if isinstance(c, str) else c for c in cells), key=key)
     keys = [k for k, _ in rows]
     if keep in keys:
         table.move_cursor(row=keys.index(keep))
@@ -150,7 +163,7 @@ class Base(App[None]):
 
     @property
     def dark(self) -> bool:
-        return self.theme != "ansi-light"
+        return self.current_theme.dark
 
     async def on_mount(self) -> None:
         self.theme = theme_for(os.environ)
@@ -179,16 +192,28 @@ class Refreshing(Screen[None]):
 
     def on_mount(self) -> None:
         self.loaded_at: float | None = None
+        self.worker: Worker[None] | None = None
         self.action_reload()
-        self.set_interval(self.every, self.action_reload)
+        self.set_interval(self.every, self.tick)
+
+    def tick(self) -> None:
+        # A slow load is left to finish rather than restarted, or it never lands.
+        if self.worker is None or not self.worker.is_running:
+            self.action_reload()
 
     def action_reload(self) -> None:
-        self.run_worker(self._load(), exclusive=True, group="load")
+        self.worker = self.run_worker(self._load(), exclusive=True, group="load")
 
     async def _load(self) -> None:
         problem = self.query_one("#problem", Static)
         try:
             await self.load()
+        except (KeyError, TypeError) as e:
+            # Some other server, or a hub too old for this TUI.
+            problem.update(
+                plain(f"{self.app.url} answered, but not like a sitemon hub or agent ({e!r}).")
+            )
+            return
         except ApiError as e:
             if self.loaded_at is None:
                 for w in self.query(".loading").results(Static):
@@ -198,7 +223,7 @@ class Refreshing(Screen[None]):
                 if self.loaded_at is None
                 else f" Showing what was there at {time.strftime('%H:%M:%S', time.localtime(self.loaded_at))}."
             )
-            problem.update(f"{e}. Trying again every {self.every:g} s.{since}")
+            problem.update(plain(f"{e}. Trying again every {self.every:g} s.{since}"))
             return
         self.loaded_at = time.time()
         problem.update("")
@@ -211,7 +236,7 @@ class SitesScreen(Refreshing):
     BINDINGS: ClassVar[list[BindingType]] = [Binding("q", "app.quit", "Quit")]
 
     def compose(self) -> ComposeResult:
-        yield Static(f"sitemon  {self.app.url}", id="top")
+        yield Static(plain(f"sitemon  {self.app.url}"), id="top")
         yield Static("", id="problem")
         yield Static("Loading sites...", id="empty", classes="note loading")
         yield DataTable(id="sites", cursor_type="row")
@@ -237,8 +262,8 @@ class SitesScreen(Refreshing):
                 status_text(s["status"], self.app.dark),
                 s["name"],
                 group,
-                first(s["latest"], "v"),
-                first(s["latest"], "temp_c"),
+                readings(s["latest"], "v"),
+                readings(s["latest"], "temp_c"),
                 ago(s["last_contact_s"]),
                 alerts[0]["message"] if alerts else "",
             ]
@@ -275,7 +300,7 @@ class SiteScreen(Refreshing):
 
     def compose(self) -> ComposeResult:
         with VerticalScroll():
-            yield Static(self.site, id="top")
+            yield Static(plain(self.site), id="top")
             yield Static("", id="problem")
             yield Static("Loading...", id="status", classes="note loading")
             yield Label("", id="range", classes="heading")
@@ -310,17 +335,24 @@ class SiteScreen(Refreshing):
         self.days = RANGES[(RANGES.index(self.days) + 1) % len(RANGES)]
         self.action_reload()
 
+    def tick(self) -> None:
+        # A year of points is costly for the hub to draw; long ranges refresh on r or d.
+        if self.days == RANGES[0]:
+            super().tick()
+
     async def load(self) -> None:
         s = await self.app.fetch(f"/api/site/{quote(self.site, safe='')}?days={self.days}")
         self.name_ = s["name"]
-        self.query_one("#top", Static).update(f"{s['group_name']} / {s['name']}")
+        self.query_one("#top", Static).update(plain(f"{s['group_name']} / {s['name']}"))
         st = Text.assemble(
             status_text(s["status"], self.app.dark), f"  last contact {ago(s['last_contact_s'])}"
         )
         for a in s["alerts"]:
-            st.append(f"\n{a['severity']}: {a['message']}")
+            st.append(plain(f"\n{a['severity']}: {a['message']}"))
         self.query_one("#status", Static).update(st)
-        self.query_one("#range", Label).update(f"Last {round(s['days'])} days  (d: change)")
+        self.query_one("#range", Label).update(
+            f"Last {round(s['days'])} days  (d: change range, r: refresh)"
+        )
         await self._charts(s)
         self._relays(s)
         fill(
@@ -367,9 +399,9 @@ class SiteScreen(Refreshing):
                 val += f"  ({_trend_text(trend)})"
             rows.append(
                 Horizontal(
-                    Label(label(m), classes="name"),
+                    Label(plain(label(m)), classes="name"),
                     Sparkline([p[1] for p in pts]),
-                    Label(val, classes="val"),
+                    Label(plain(val), classes="val"),
                     classes="chart",
                 )
             )
@@ -445,7 +477,10 @@ class ConfirmCommand(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         verb = {"pulse": "Pulse", "on": "Switch on", "off": "Switch off"}[self.action]
         with Vertical(id="dialog"):
-            yield Label(f"{verb} {self.relay} at {self.site_name}?", classes="heading")
+            where = (
+                self.site_name if self.site_name == self.site else f"{self.site_name} ({self.site})"
+            )
+            yield Label(plain(f"{verb} {self.relay} at {where}?"), classes="heading")
             yield Static(
                 "This switches equipment at the site. The command is signed with your key, "
                 "and the site ignores it if it hasn't collected it within 2 minutes."
@@ -470,6 +505,8 @@ class ConfirmCommand(ModalScreen[None]):
         self.dismiss(None)
 
     def send(self) -> None:
+        if self.query_one("#send", Button).disabled:
+            return
         result = self.query_one("#result", Static)
         args: dict[str, Any] = {"relay": self.relay, "action": self.action}
         inputs = self.query("#seconds")
@@ -480,14 +517,16 @@ class ConfirmCommand(ModalScreen[None]):
             except ValueError:
                 seconds = math.nan
             if not (math.isfinite(seconds) and seconds > 0):
-                result.update(f"{raw!r} isn't a number of seconds.")
+                result.update(plain(f"{raw!r} isn't a number of seconds."))
                 return
             args["seconds"] = seconds
         assert self.app.key is not None
         cmd = Command.create(self.site, "relay", args).signed(self.app.key)
         self.query_one("#send", Button).disabled = True
         self.query_one("#cancel", Button).label = "Close"
-        result.update(f"Sent. Waiting for {self.site_name} to collect it on its next sync...")
+        result.update(
+            plain(f"Sent. Waiting for {self.site_name} to collect it on its next sync...")
+        )
         self.run_worker(self._send(cmd), exclusive=True)
 
     async def _send(self, cmd: Command) -> None:
@@ -496,10 +535,14 @@ class ConfirmCommand(ModalScreen[None]):
         try:
             status, detail = await send_command(self.app.session, self.app.url, cmd, self.WAIT)
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            result.update(f"Couldn't reach the hub: {e or type(e).__name__}. Nothing was sent.")
-            self.query_one("#send", Button).disabled = False
+            result.update(
+                plain(
+                    f"No confirmation from the hub: {e or type(e).__name__}. The command may be "
+                    "queued, so check Commands before sending again."
+                )
+            )
             return
-        result.update(f"{status}: {detail}" if detail else status)
+        result.update(plain(f"{status}: {detail}" if detail else status))
 
 
 class HubApp(Base):
@@ -519,7 +562,7 @@ class AgentScreen(Refreshing):
 
     def compose(self) -> ComposeResult:
         with VerticalScroll():
-            yield Static(f"sitemon agent  {self.app.url}", id="top")
+            yield Static(plain(f"sitemon agent  {self.app.url}"), id="top")
             yield Static("", id="problem")
             yield Static("Loading...", id="status", classes="note loading")
             yield Label("Hubs", classes="heading")
@@ -538,14 +581,14 @@ class AgentScreen(Refreshing):
 
     async def load(self) -> None:
         st = await self.app.fetch("/status.json")
-        self.query_one("#top", Static).update(f"{st['site']}  sitemon {st['version']}")
+        self.query_one("#top", Static).update(plain(f"{st['site']}  sitemon {st['version']}"))
         line = (
             f"up {human_duration(st['uptime_s'])}  queue {st['queue']}  dropped {st['dropped']}  "
             f"last sync {ago(st['last_sync_age_s'])}"
         )
         if st["last_sync_error"]:
             line += f"\nlast sync failed: {st['last_sync_error']}"
-        self.query_one("#status", Static).update(line)
+        self.query_one("#status", Static).update(plain(line))
         fill(
             self.query_one("#hubs", DataTable),
             [
@@ -555,7 +598,7 @@ class AgentScreen(Refreshing):
         )
         faults = st["faults"]
         self.query_one("#faults", Static).update(
-            "\n".join(f"{k}: {v}" for k, v in faults.items()) if faults else "None."
+            plain("\n".join(f"{k}: {v}" for k, v in faults.items()) if faults else "None.")
         )
         now = time.time()
         rows = []
