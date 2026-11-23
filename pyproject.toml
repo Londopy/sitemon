@@ -57,7 +57,7 @@ packages = ["sitemon"]
 [tool.hatch.build.targets.sdist]
 # Deployment files and CI config are for people running the repo, not for
 # anyone installing from PyPI.
-exclude = [".github/", "deploy/"]
+exclude = [".github/", "deploy/", "docs/"]
 
 [tool.ruff]
 line-length = 100
