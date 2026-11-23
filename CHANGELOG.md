@@ -8,6 +8,8 @@ what appears on its GitHub release page. Validated in CI by
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-23
+
 ### Added
 
 - `sitemon tui`, a terminal dashboard for checking things over SSH: every site on a hub with its
@@ -81,7 +83,8 @@ what appears on its GitHub release page. Validated in CI by
   summary to Discord.
 - Dashboard with a tile and sparklines per site, and CSV export per sensor.
 
-[Unreleased]: https://github.com/Londopy/sitemon/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Londopy/sitemon/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Londopy/sitemon/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Londopy/sitemon/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Londopy/sitemon/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Londopy/sitemon/compare/v0.1.0...v0.2.0
