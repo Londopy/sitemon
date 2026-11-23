@@ -95,6 +95,7 @@ class RelayConfig:
     active_low: bool
     pulse: float  # pulse mode: how long it stays on
     max_on: float  # switch mode: the longest it may stay on
+    watchdog_pin: int | None = None  # toggled only while this relay is on
 
 
 @dataclass
@@ -187,7 +188,17 @@ def _pin(v: Any, where: str) -> int:
 # the control link fails (47 CFR 97.213). The relay loop ticks once a second
 # and can stall, so leave some margin.
 TX_LIMIT = 170.0
-RELAY_KEYS = {"name", "pin", "mode", "active_low", "pulse", "max_on", "transmitter"}
+RELAY_KEYS = {
+    "name",
+    "pin",
+    "mode",
+    "active_low",
+    "pulse",
+    "max_on",
+    "transmitter",
+    "watchdog_pin",
+}
+MESH = ipaddress.ip_network("10.0.0.0/8")  # AREDN's address range
 
 
 def _limit(d: dict[str, Any], key: str, default: str, where: str, transmitter: bool) -> float:
@@ -196,8 +207,9 @@ def _limit(d: dict[str, Any], key: str, default: str, where: str, transmitter: b
         raise ConfigError(f"{where}.{key}: more than 0 and at most a day")
     if transmitter and v > TX_LIMIT:
         raise ConfigError(
-            f"{where}.{key}: a relay that can make the station transmit is limited to "
-            f"{TX_LIMIT:g} s, under the 3 minutes of 47 CFR 97.213"
+            f"{where}.{key}: relays are limited to {TX_LIMIT:g} s, under the 3 minutes of "
+            "47 CFR 97.213; set transmitter = false on one that can't make the station "
+            "transmit (shack lights) to allow longer"
         )
     return v
 
@@ -208,10 +220,17 @@ def _control_hub(url: str) -> None:
     from urllib.parse import urlsplit
 
     u = urlsplit(url)
-    if u.hostname is not None and u.hostname.rstrip(".").endswith(".mesh"):
+    host = (u.hostname or "").rstrip(".")
+    try:
+        on_mesh = ipaddress.ip_address(host) in MESH
+    except ValueError:
+        # AREDN names end in .local.mesh, and the mesh completes bare names to them.
+        on_mesh = host.endswith(".mesh") or ("." not in host and host != "localhost")
+    if on_mesh:
         raise ConfigError(
-            f"[control] hubs: {url!r} is on the AREDN mesh; list a hub the site reaches over "
-            "the internet or cellular (47 CFR 97.213)"
+            f"[control] hubs: {url!r} may be on the AREDN mesh (a .mesh name, a bare name or a "
+            "10.x address); list a hub the site reaches over the internet or cellular by its "
+            "full name (47 CFR 97.213)"
         )
     if u.scheme == "https":
         return
@@ -261,9 +280,15 @@ def _relays(raw: list[dict[str, Any]], taken: set[int]) -> list[RelayConfig]:
         unknown = sorted(set(r) - RELAY_KEYS)
         if unknown:
             raise ConfigError(f"{where}: unknown setting {unknown[0]!r}")
-        tx = r.get("transmitter", False)
+        tx = r.get("transmitter", True)
         if not isinstance(tx, bool):
             raise ConfigError(f"{where}.transmitter: true or false")
+        wd = r.get("watchdog_pin")
+        if wd is not None:
+            wd = _pin(wd, f"{where}.watchdog_pin")
+            if wd in taken or wd == pin:
+                raise ConfigError(f"{where}: GPIO{wd} is already used")
+            taken.add(wd)
         names.add(name)
         taken.add(pin)
         out.append(
@@ -274,6 +299,7 @@ def _relays(raw: list[dict[str, Any]], taken: set[int]) -> list[RelayConfig]:
                 active_low=bool(r.get("active_low", True)),
                 pulse=_limit(r, "pulse", "10s", where, tx and mode == "pulse"),
                 max_on=_limit(r, "max_on", "2m" if tx else "1h", where, tx and mode == "switch"),
+                watchdog_pin=wd,
             )
         )
     return out

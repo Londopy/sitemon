@@ -5,7 +5,8 @@ ALLOWED_COMMANDS (the optional registration check) or an ``rpt localplay`` of a
 file in the agent's own sound directory (spoken alerts), and refuses anything
 else itself.
 The AMI user needs ``read = system,call`` and ``write = reporting``; the
-registration check also needs ``write = command``, which allows any CLI command.
+registration check and spoken alerts also need ``write = command``, which allows
+any CLI command.
 """
 
 from __future__ import annotations

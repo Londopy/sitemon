@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import base64
+import dataclasses
 import os
+import socket
 import sys
 from pathlib import Path
 from typing import Any
 
+import aiohttp
 import pytest
 from aiohttp import web
+from aiohttp.abc import AbstractResolver, ResolveResult
 from aiohttp.test_utils import TestClient, TestServer
 
 from sitemon import SigningKey
@@ -18,7 +22,7 @@ from sitemon.agent import runtime
 from sitemon.agent.ami import AmiClient, AmiError
 from sitemon.agent.announce import AnnounceError, Announcer
 from sitemon.agent.relays import RelayBank, RelayError
-from sitemon.agent.runtime import Agent
+from sitemon.agent.runtime import Agent, NoMeshResolver
 from sitemon.config import (
     AnnounceConfig,
     ChannelConfig,
@@ -177,6 +181,57 @@ def test_keepalive_toggles_only_while_healthy(tmp_path: Path, key: SigningKey) -
     ag.log.close()
 
 
+def test_a_relays_own_watchdog_runs_only_while_it_is_on(tmp_path: Path, key: SigningKey) -> None:
+    out = Outputs()
+    radio = dataclasses.replace(RADIO, watchdog_pin=23)
+    cfg = agent_cfg(
+        tmp_path,
+        ["http://hub"],
+        relays=[radio, LIGHTS],
+        control=ControlConfig(["http://hub"], [key.public_key().to_b64()], [], None),
+    )
+    ag = Agent(cfg, key, [], output=out)
+    assert ag.relays is not None
+    wd = out.by_pin[23]
+    ag.relays_once()
+    assert wd.changes == []  # off: nothing to keep alive
+    ag.relays.run("radio", "pulse")
+    ag.relays_once()
+    ag.relays_once()
+    assert wd.changes == [True, False]
+    ag.last_sample -= 3600  # sampling has wedged: the watchdog stops with the relay still on
+    ag.relays_once()
+    assert wd.changes == [True, False] and ag.relays.relays["radio"].is_on
+    ag._power_down(close=True)
+    assert wd.closed
+    ag.log.close()
+
+
+class Dns(AbstractResolver):
+    """Stands in for DNS, answering every name with ``answers``."""
+
+    def __init__(self, answers: list[str]) -> None:
+        self.answers = answers
+
+    async def resolve(
+        self, host: str, port: int = 0, family: socket.AddressFamily = socket.AF_INET
+    ) -> list[ResolveResult]:
+        return [
+            ResolveResult(hostname=host, host=a, port=port, family=family, proto=0, flags=0)
+            for a in self.answers
+        ]
+
+    async def close(self) -> None:
+        pass
+
+
+async def test_mesh_addresses_are_dropped_from_dns_answers() -> None:
+    mixed = NoMeshResolver(Dns(["10.54.3.2", "203.0.113.7"]))
+    assert [r["host"] for r in await mixed.resolve("hub.example.org", 443)] == ["203.0.113.7"]
+    with pytest.raises(OSError, match="only to AREDN mesh addresses"):
+        await NoMeshResolver(Dns(["10.54.3.2"])).resolve("hub.example.org", 443)
+
+
 class Rig:
     """A hub with one operator and an agent with relays that takes commands from it."""
 
@@ -250,8 +305,27 @@ async def test_relay_command_from_operator_to_relay_and_back(tmp_path: Path) -> 
         rig.out.by_pin[5].changes.clear()
         await ag.handle_command(cmd.to_dict())
         assert rig.out.by_pin[5].changes == []
-        if ag._session:
-            await ag._session.close()
+        for session in (ag._session, ag._control_session):
+            if session:
+                await session.close()
+    ag.log.close()
+
+
+async def test_a_control_hub_that_resolves_onto_the_mesh_is_not_polled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig = Rig(tmp_path)
+    async with TestClient(TestServer(rig.hub.make_app())) as client:
+        url = f"http://hub.example:{client.port}"
+        cmd = rig.command(relay="radio", action="pulse")
+        assert (await client.post("/api/commands", json=cmd.to_dict())).status == 202
+        ag = rig.agent(url)
+        for answer, arrived in (("10.54.3.2", 0), ("127.0.0.1", 1)):
+            monkeypatch.setattr(aiohttp, "DefaultResolver", lambda a=answer: Dns([a]))
+            assert await ag.poll_commands(ag.hubs[url]) == arrived
+            assert ag._control_session is not None
+            await ag._control_session.close()
+        assert rig.out.by_pin[5].level  # reached over the non-mesh address only
     ag.log.close()
 
 
@@ -524,19 +598,20 @@ def write(tmp: Path, text: str) -> str:
 def test_agent_control_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     op = SigningKey.generate().public_key().to_b64()
     base = (
-        f'[site]\nid="s"\nkey="k"\n[agent]\nhubs=["https://hub"]\n'
-        f'[control]\nhubs=["https://hub"]\noperators=["{op}"]\nwatchdog_pin=22\n'
+        f'[site]\nid="s"\nkey="k"\n[agent]\nhubs=["https://hub.example"]\n'
+        f'[control]\nhubs=["https://hub.example"]\noperators=["{op}"]\nwatchdog_pin=22\n'
         '[[relays]]\nname="radio"\npin=5\npulse="20s"\n'
         '[[relays]]\nname="lights"\npin=6\nmode="switch"\nmax_on="2h"\nactive_low=false\n'
+        "transmitter=false\n"
     )
     cfg = load_agent_config(write(tmp_path, base))
     assert cfg.control is not None and cfg.control.watchdog_pin == 22
     assert [(r.name, r.mode, r.pulse, r.max_on, r.active_low) for r in cfg.relays] == [
-        ("radio", "pulse", 20, 3600, True),
+        ("radio", "pulse", 20, 120, True),
         ("lights", "switch", 10, 7200, False),
     ]
     for old, new, msg in [
-        ('[control]\nhubs=["https://hub"]', '[control]\nhubs=["https://other"]', "not in"),
+        ('[control]\nhubs=["https://hub.example"]', '[control]\nhubs=["https://other"]', "not in"),
         (f'operators=["{op}"]', 'operators=["junk"]', "not a public key"),
         ("pin=6", "pin=5", "already used"),
         ("pin=6", "pin=22", "already used"),
@@ -551,8 +626,8 @@ def test_announce_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("S", "x")
     hk = SigningKey.generate().public_key().to_b64()
     base = (
-        '[site]\nid="s"\nkey="k"\n[agent]\nhubs=["https://hub"]\n'
-        f'[control]\nhubs=["https://hub"]\nhub_keys=["{hk}"]\n'
+        '[site]\nid="s"\nkey="k"\n[agent]\nhubs=["https://hub.example"]\n'
+        f'[control]\nhubs=["https://hub.example"]\nhub_keys=["{hk}"]\n'
         '[ami]\nnode=1999\nsecret_env="S"\n[announce]\nenabled=true\n'
     )
     cfg = load_agent_config(write(tmp_path, base))
@@ -907,24 +982,39 @@ def test_old_hub_database_gets_the_new_column(tmp_path: Path) -> None:
         ("pin=5", "pin=99", "0-27"),
         ("watchdog_pin=22", "watchdog_pin=true", "0-27"),
         (
-            'hubs=["https://hub"]\n[control]\nhubs=["https://hub"]',
-            'hubs=["http://hub"]\n[control]\nhubs=["http://hub"]',
+            'hubs=["https://hub.example"]\n[control]\nhubs=["https://hub.example"]',
+            'hubs=["http://hub.example"]\n[control]\nhubs=["http://hub.example"]',
             "must be https",
         ),
         (
-            'hubs=["https://hub"]\n[control]\nhubs=["https://hub"]',
+            'hubs=["https://hub.example"]\n[control]\nhubs=["https://hub.example"]',
             'hubs=["https://hub.local.mesh"]\n[control]\nhubs=["https://hub.local.mesh"]',
             "on the AREDN mesh",
         ),
         (
-            'hubs=["https://hub"]\n[control]\nhubs=["https://hub"]',
+            'hubs=["https://hub.example"]\n[control]\nhubs=["https://hub.example"]',
             'hubs=["Https://Hub.Local.Mesh.:8443/"]\n[control]\nhubs=["Https://Hub.Local.Mesh.:8443/"]',
             "on the AREDN mesh",
         ),
         (
-            'hubs=["https://hub"]\n[control]\nhubs=["https://hub"]',
+            'hubs=["https://hub.example"]\n[control]\nhubs=["https://hub.example"]',
             'hubs=["https://hub.mesh"]\n[control]\nhubs=["https://hub.mesh"]',
             "on the AREDN mesh",
+        ),
+        (
+            'hubs=["https://hub.example"]\n[control]\nhubs=["https://hub.example"]',
+            'hubs=["https://myhub:8470"]\n[control]\nhubs=["https://myhub:8470"]',
+            "a bare name",
+        ),
+        (
+            'hubs=["https://hub.example"]\n[control]\nhubs=["https://hub.example"]',
+            'hubs=["https://10.54.3.2"]\n[control]\nhubs=["https://10.54.3.2"]',
+            "on the AREDN mesh",
+        ),
+        (
+            'pulse="20s"',
+            'pulse="20s"\nwatchdog_pin=5',
+            "GPIO5 is already used",
         ),
         ('pulse="20s"', 'pulse="171s"\ntransmitter=true', "limited to 170 s"),
         ('pulse="20s"', 'pulse="0s"\ntransmitter=true', "more than 0"),
@@ -935,8 +1025,8 @@ def test_old_hub_database_gets_the_new_column(tmp_path: Path) -> None:
 def test_control_config_limits(tmp_path: Path, old: str, new: str, msg: str) -> None:
     op = SigningKey.generate().public_key().to_b64()
     base = (
-        f'[site]\nid="s"\nkey="k"\n[agent]\nhubs=["https://hub"]\n'
-        f'[control]\nhubs=["https://hub"]\noperators=["{op}"]\nwatchdog_pin=22\n'
+        f'[site]\nid="s"\nkey="k"\n[agent]\nhubs=["https://hub.example"]\n'
+        f'[control]\nhubs=["https://hub.example"]\noperators=["{op}"]\nwatchdog_pin=22\n'
         '[[relays]]\nname="radio"\npin=5\npulse="20s"\n'
     )
     load_agent_config(write(tmp_path, base))
@@ -947,13 +1037,17 @@ def test_control_config_limits(tmp_path: Path, old: str, new: str, msg: str) -> 
 def test_transmitter_relay_limits(tmp_path: Path) -> None:
     op = SigningKey.generate().public_key().to_b64()
     text = (
-        f'[site]\nid="s"\nkey="k"\n[agent]\nhubs=["https://hub"]\n'
-        f'[control]\nhubs=["https://hub"]\noperators=["{op}"]\n'
+        f'[site]\nid="s"\nkey="k"\n[agent]\nhubs=["https://hub.example"]\n'
+        f'[control]\nhubs=["https://hub.example"]\noperators=["{op}"]\n'
         '[[relays]]\nname="tx"\npin=5\nmode="switch"\ntransmitter=true\n'
-        '[[relays]]\nname="lights"\npin=6\nmode="switch"\n'
+        '[[relays]]\nname="lights"\npin=6\nmode="switch"\ntransmitter=false\n'
+        '[[relays]]\nname="fan"\npin=7\nmode="switch"\n'
     )
-    tx, lights = load_agent_config(write(tmp_path, text)).relays
-    assert tx.max_on == 120 and lights.max_on == 3600
+    tx, lights, fan = load_agent_config(write(tmp_path, text)).relays
+    # Held to the limit unless marked as unable to make the station transmit.
+    assert tx.max_on == fan.max_on == 120 and lights.max_on == 3600
+    with pytest.raises(ConfigError, match="set transmitter = false"):
+        load_agent_config(write(tmp_path, text.replace('name="fan"', 'name="fan"\nmax_on="1h"')))
     for limit in ('max_on="170s"', 'max_on="171s"'):
         relay = text.replace("transmitter=true\n", f"transmitter=true\n{limit}\n")
         if limit.endswith('171s"'):
@@ -988,8 +1082,8 @@ def test_announce_command_templates_are_checked(
     monkeypatch.setenv("S", "x")
     hk = SigningKey.generate().public_key().to_b64()
     text = (
-        '[site]\nid="s"\nkey="k"\n[agent]\nhubs=["https://hub"]\n'
-        f'[control]\nhubs=["https://hub"]\nhub_keys=["{hk}"]\n'
+        '[site]\nid="s"\nkey="k"\n[agent]\nhubs=["https://hub.example"]\n'
+        f'[control]\nhubs=["https://hub.example"]\nhub_keys=["{hk}"]\n'
         '[ami]\nnode=1999\nsecret_env="S"\n'
         f"[announce]\nenabled=true\nsay_command={cmd}\n"
     )
