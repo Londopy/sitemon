@@ -31,7 +31,7 @@ classifiers = [
 # once a year. aiohttp covers the hub server and every outgoing HTTP call;
 # cryptography is packaged by Debian (python3-cryptography).
 dependencies = [
-    "aiohttp>=3.9",
+    "aiohttp>=3.10",
     "cryptography>=41",
 ]
 

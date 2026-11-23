@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import dataclasses
 import os
 import socket
@@ -24,6 +25,7 @@ from sitemon.agent.announce import AnnounceError, Announcer
 from sitemon.agent.relays import RelayBank, RelayError
 from sitemon.agent.runtime import Agent, NoMeshResolver
 from sitemon.config import (
+    _control_hub,
     AnnounceConfig,
     ChannelConfig,
     ConfigError,
@@ -225,11 +227,16 @@ class Dns(AbstractResolver):
         pass
 
 
-async def test_mesh_addresses_are_dropped_from_dns_answers() -> None:
-    mixed = NoMeshResolver(Dns(["10.54.3.2", "203.0.113.7"]))
+async def test_mesh_addresses_are_dropped_from_dns_answers_for_control_hubs() -> None:
+    hubs = {"hub.example.org"}
+    mixed = NoMeshResolver(hubs, Dns(["10.54.3.2", "203.0.113.7"]))
     assert [r["host"] for r in await mixed.resolve("hub.example.org", 443)] == ["203.0.113.7"]
-    with pytest.raises(OSError, match="only to AREDN mesh addresses"):
-        await NoMeshResolver(Dns(["10.54.3.2"])).resolve("hub.example.org", 443)
+    for answer in ("10.54.3.2", "::ffff:10.54.3.2"):
+        with pytest.raises(OSError, match="only to AREDN mesh addresses"):
+            await NoMeshResolver(hubs, Dns([answer])).resolve("HUB.example.org.", 443)
+    # A hub that only takes uploads may well be on the mesh.
+    mesh_hub = await NoMeshResolver(hubs, Dns(["10.54.3.2"])).resolve("hub.local.mesh", 443)
+    assert [r["host"] for r in mesh_hub] == ["10.54.3.2"]
 
 
 class Rig:
@@ -305,14 +312,13 @@ async def test_relay_command_from_operator_to_relay_and_back(tmp_path: Path) -> 
         rig.out.by_pin[5].changes.clear()
         await ag.handle_command(cmd.to_dict())
         assert rig.out.by_pin[5].changes == []
-        for session in (ag._session, ag._control_session):
-            if session:
-                await session.close()
+        if ag._session:
+            await ag._session.close()
     ag.log.close()
 
 
 async def test_a_control_hub_that_resolves_onto_the_mesh_is_not_polled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     rig = Rig(tmp_path)
     async with TestClient(TestServer(rig.hub.make_app())) as client:
@@ -322,10 +328,65 @@ async def test_a_control_hub_that_resolves_onto_the_mesh_is_not_polled(
         ag = rig.agent(url)
         for answer, arrived in (("10.54.3.2", 0), ("127.0.0.1", 1)):
             monkeypatch.setattr(aiohttp, "DefaultResolver", lambda a=answer: Dns([a]))
-            assert await ag.poll_commands(ag.hubs[url]) == arrived
-            assert ag._control_session is not None
-            await ag._control_session.close()
+            with caplog.at_level(logging.INFO, logger="sitemon.agent"):
+                assert await ag.poll_commands(ag.hubs[url]) == arrived
+            assert ag._session is not None
+            await ag._session.close()
+        assert "resolves only to AREDN mesh addresses" in caplog.text  # the log says why
         assert rig.out.by_pin[5].level  # reached over the non-mesh address only
+    ag.log.close()
+
+
+async def test_a_poll_is_not_redirected(tmp_path: Path, key: SigningKey) -> None:
+    hits: list[str] = []
+
+    async def elsewhere(request: web.Request) -> web.Response:
+        hits.append(request.path)
+        return web.json_response({"commands": []})
+
+    other = web.Application()
+    other.router.add_post("/api/commands/poll", elsewhere)
+    async with TestServer(other) as there:
+
+        async def bounce(_: web.Request) -> web.Response:
+            raise web.HTTPTemporaryRedirect(str(there.make_url("/api/commands/poll")))
+
+        hub = web.Application()
+        hub.router.add_post("/api/commands/poll", bounce)
+        async with TestServer(hub) as here:
+            url = str(here.make_url("")).rstrip("/")
+            control = ControlConfig([url], [key.public_key().to_b64()], [], None)
+            ag = Agent(agent_cfg(tmp_path, [url], control=control), key, [])
+            assert await ag.poll_commands(ag.hubs[url]) == 0
+            assert hits == []
+            assert ag._session is not None
+            await ag._session.close()
+            ag.log.close()
+
+
+def test_each_on_period_starts_the_relays_watchdog_with_a_rising_edge(
+    tmp_path: Path, key: SigningKey
+) -> None:
+    out = Outputs()
+    radio = dataclasses.replace(RADIO, watchdog_pin=23, pulse=1.0)
+    control = ControlConfig(["http://hub"], [key.public_key().to_b64()], [], None)
+    ag = Agent(
+        agent_cfg(tmp_path, ["http://hub"], relays=[radio], control=control), key, [], output=out
+    )
+    assert ag.relays is not None
+    now = [100.0]
+    ag.relays.clock = lambda: now[0]
+    wd = out.by_pin[23]
+    for _ in range(4):
+        wd.changes.clear()
+        ag.relays.run("radio", "pulse")
+        now[0] += 0.75
+        ag.relays_once()
+        assert wd.changes[0] is True  # the first tick after the command
+        now[0] += 1.5
+        ag.relays_once()
+        ag.relays_once()
+        assert not wd.level  # rests low between pulses
     ag.log.close()
 
 
@@ -1016,6 +1077,7 @@ def test_old_hub_database_gets_the_new_column(tmp_path: Path) -> None:
             'pulse="20s"\nwatchdog_pin=5',
             "GPIO5 is already used",
         ),
+        ('pulse="20s"', 'pulse="20s"\nwatchdog_pin=22', "GPIO22 is already used"),
         ('pulse="20s"', 'pulse="171s"\ntransmitter=true', "limited to 170 s"),
         ('pulse="20s"', 'pulse="0s"\ntransmitter=true', "more than 0"),
         ('pulse="20s"', 'pulse="20s"\ntransmitter="yes"', "true or false"),
@@ -1062,11 +1124,43 @@ def test_transmitter_relay_limits(tmp_path: Path) -> None:
 
 def test_loopback_control_hub_may_be_http(tmp_path: Path) -> None:
     op = SigningKey.generate().public_key().to_b64()
-    text = (
-        f'[site]\nid="s"\nkey="k"\n[agent]\nhubs=["http://127.0.0.1:8470"]\n'
-        f'[control]\nhubs=["http://127.0.0.1:8470"]\noperators=["{op}"]\n'
+    for hub in ("http://127.0.0.1:8470", "http://localhost:8470"):
+        text = (
+            f'[site]\nid="s"\nkey="k"\n[agent]\nhubs=["{hub}"]\n'
+            f'[control]\nhubs=["{hub}"]\noperators=["{op}"]\n'
+        )
+        assert load_agent_config(write(tmp_path, text)).control is not None
+
+
+def test_control_hubs_that_may_be_the_mesh_are_refused() -> None:
+    for url in (
+        "https://[::ffff:10.54.3.2]",
+        "https://[::ffff:a36:302]:8443/x",
+        "https://10.1",
+        "https://012.0.0.1",
+        "https://myhub",
+    ):
+        with pytest.raises(ConfigError, match="AREDN mesh"):
+            _control_hub(url)
+    with pytest.raises(ConfigError, match="must be an https URL"):
+        _control_hub("sitemon.example.org")
+    for url in ("https://[2001:db8::1]", "https://203.0.113.7", "https://hub.example"):
+        _control_hub(url)
+
+
+def test_a_relays_watchdog_pin_must_be_free(tmp_path: Path) -> None:
+    op = SigningKey.generate().public_key().to_b64()
+    base = (
+        f'[site]\nid="s"\nkey="k"\n[agent]\nhubs=["https://hub.example"]\n'
+        f'[control]\nhubs=["https://hub.example"]\noperators=["{op}"]\n'
+        '[[sensors]]\ntype="door"\nname="door"\npin=17\n'
+        '[[relays]]\nname="radio"\npin=5\nWD\n'
+        '[[relays]]\nname="fan"\npin=6\n'
     )
-    assert load_agent_config(write(tmp_path, text)).control is not None
+    assert load_agent_config(write(tmp_path, base.replace("WD", "watchdog_pin=24")))
+    for taken in (17, 6):
+        with pytest.raises(ConfigError, match=f"GPIO{taken} is already used"):
+            load_agent_config(write(tmp_path, base.replace("WD", f"watchdog_pin={taken}")))
 
 
 @pytest.mark.parametrize(

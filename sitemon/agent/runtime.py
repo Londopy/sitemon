@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import html
-import ipaddress
 import socket
 import logging
 import math
@@ -15,6 +15,7 @@ import time
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 import aiohttp
 from aiohttp import web
@@ -24,7 +25,7 @@ from .. import __version__
 from .._commands import Command
 from .._events import Event, PublicKey, SigningKey, canonical_json, envelope_body
 from .._systemd import notify, watchdog_interval
-from ..config import MESH, AgentConfig
+from ..config import AgentConfig, is_mesh
 from . import aredn
 from .ami import AmiClient, AmiError
 from .announce import AnnounceError, Announcer
@@ -78,19 +79,25 @@ class SyncError(Exception):
 
 
 class NoMeshResolver(AbstractResolver):
-    """Drops AREDN mesh addresses from DNS answers, so a control hub whose name
-    resolves onto the mesh is never reached that way (47 CFR 97.213)."""
+    """Drops AREDN mesh addresses from DNS answers for ``hosts`` (the control
+    hubs), so a name that resolves onto the mesh is never reached that way
+    (47 CFR 97.213). Other hosts resolve as usual."""
 
-    def __init__(self, inner: AbstractResolver | None = None) -> None:
+    def __init__(self, hosts: set[str], inner: AbstractResolver | None = None) -> None:
+        self.hosts = hosts
         self.inner = inner or aiohttp.DefaultResolver()
 
     async def resolve(
         self, host: str, port: int = 0, family: socket.AddressFamily = socket.AF_INET
     ) -> list[ResolveResult]:
         found = await self.inner.resolve(host, port, family)
-        kept = [r for r in found if ipaddress.ip_address(r["host"]) not in MESH]
+        if host.lower().rstrip(".") not in self.hosts:
+            return found
+        kept = [r for r in found if not is_mesh(r["host"])]
         if not kept:
-            raise OSError(f"{host} resolves only to AREDN mesh addresses (10.x)")
+            raise OSError(
+                errno.EHOSTUNREACH, f"{host} resolves only to AREDN mesh addresses (10.x)"
+            )
         return kept
 
     async def close(self) -> None:
@@ -227,7 +234,6 @@ class Agent:
         self.last_sample = time.monotonic()
         self._stop = asyncio.Event()
         self._session: aiohttp.ClientSession | None = None
-        self._control_session: aiohttp.ClientSession | None = None
 
     def _sound_dir(self) -> str:
         return os.path.abspath(os.path.join(self.cfg.data_dir, "announce"))
@@ -332,6 +338,8 @@ class Agent:
             for name, wd in self.relay_watchdogs.items():
                 if self.relays.relays[name].is_on:
                     wd.toggle()
+                else:
+                    wd.rest()
 
     def _power_down(self, close: bool = False) -> None:
         """Switch every relay off (and with ``close``, release the pins)."""
@@ -358,8 +366,8 @@ class Agent:
         env = self._envelope([])
         url = hub.url.rstrip("/") + "/api/commands/poll"
         try:
-            async with self._control_http().post(
-                url, json=env, timeout=aiohttp.ClientTimeout(total=30)
+            async with self._http().post(
+                url, json=env, timeout=aiohttp.ClientTimeout(total=30), allow_redirects=False
             ) as r:
                 if r.status != 200:
                     raise SyncError(f"HTTP {r.status} {(await r.text())[:200]}")
@@ -480,17 +488,12 @@ class Agent:
 
     def _http(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(headers={"User-Agent": f"sitemon/{__version__}"})
-        return self._session
-
-    def _control_http(self) -> aiohttp.ClientSession:
-        """For command polls: never connects to an AREDN mesh address."""
-        if self._control_session is None or self._control_session.closed:
-            self._control_session = aiohttp.ClientSession(
+            hosts = {(urlsplit(u).hostname or "").rstrip(".") for u in self.control_hubs}
+            self._session = aiohttp.ClientSession(
                 headers={"User-Agent": f"sitemon/{__version__}"},
-                connector=aiohttp.TCPConnector(resolver=NoMeshResolver()),
+                connector=aiohttp.TCPConnector(resolver=NoMeshResolver(hosts)),
             )
-        return self._control_session
+        return self._session
 
     async def sync_once(self, batch: int = 500) -> bool:
         """Bring every hub up to date. True when all of them are."""
@@ -638,9 +641,8 @@ class Agent:
                 await self.ami.close()
             with contextlib.suppress(sqlite3.Error):
                 await self.sync_once()
-            for session in (self._session, self._control_session):
-                if session is not None:
-                    await session.close()
+            if self._session is not None:
+                await self._session.close()
             for s in self.sensors:
                 with contextlib.suppress(SensorError, OSError):
                     s.close()

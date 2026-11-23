@@ -162,11 +162,12 @@ sitemon doesn't replace Allmon3; run both. It reads AMI the same way, read-only.
   don't key the transmitter or change its settings. Remote control has to come over a wireline
   path (internet, cellular) unless you run a proper auxiliary station (47 CFR 97.213). sitemon
   refuses control hubs that may be on the mesh (`.mesh` and bare names, 10.x addresses) or on
-  plain HTTP, and its command polls never connect to a 10.x address. It can't see a tunnel or
-  gateway onto the mesh behind some other address, so listing only wireline hubs is still up to
-  you. Every relay switches off at most 170 s after the command that switched it on, inside the
-  3 minutes 97.213 allows after a failed control link, unless it's marked
-  `transmitter = false` (shack lights). That limits what a command can start; timing each
+  plain HTTP. It never connects to a control hub at a 10.x address, whatever its name resolves
+  to, and command polls don't follow redirects. It can't see a tunnel or gateway onto the mesh
+  behind some other address, so listing only wireline hubs is still up to you. Every relay
+  switches off about 170 s at most after the command that switched it on (the relay loop checks
+  once a second), inside the 3 minutes 97.213 allows after a failed control link, unless it's
+  marked `transmitter = false` (shack lights). That limits what a command can start; timing each
   transmission stays the repeater controller's job.
 - **Encrypt data over the mesh.** 47 CFR 97.113(a)(4) bars messages encoded to obscure their
   meaning, and the common reading is that this rules out encrypting terrestrial amateur traffic

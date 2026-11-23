@@ -206,16 +206,17 @@ control link must be wireline (internet, cellular) unless you run a proper auxil
 - List only hubs reached over the internet or cellular under `[control] hubs`, by https and by
   their full name. sitemon refuses plain http unless the hub is on the Pi itself, and refuses
   anything that may be the mesh: `*.mesh` names, bare names (a mesh node completes them to
-  `.local.mesh`) and 10.x addresses, AREDN's range. Command polls also never connect to a 10.x
-  address, whatever a name resolves to. A VPN that uses 10.x addresses can't carry commands for
-  that reason. What sitemon can't check is a hub on some other address that the site reaches
-  over the mesh anyway, through a tunnel or a gateway, so never list one.
+  `.local.mesh`) and 10.x addresses, AREDN's range. The agent also never connects to a control
+  hub at a 10.x address, whatever its name resolves to, and command polls don't follow
+  redirects. A VPN that uses 10.x addresses can't carry commands for that reason. What sitemon
+  can't check is a hub on some other address that the site reaches over the mesh anyway,
+  through a tunnel or a gateway, so never list one.
 - 97.213 also asks that a station under remote control stop transmitting within 3 minutes if the
   control link fails. sitemon can't see transmissions; what it does is switch every relay
-  (except those marked `transmitter = false`) off at most 170 s after the command that switched
-  it on, whether the hub, the link or the rest of the agent is still working or not. So nothing a
-  command started through a relay outlasts that, with the cutoff circuit as the backstop if the
-  Pi hangs. The repeater's own time-out timer still limits each transmission, as it always has.
+  (except those marked `transmitter = false`) off about 170 s at most after the command that
+  switched it on (the relay loop checks once a second), whether the hub, the link or the rest of
+  the agent is still working or not. So nothing a command started through a relay outlasts that,
+  with the cutoff circuit as the backstop if the Pi hangs. The repeater's own time-out timer still limits each transmission, as it always has.
 
 **Operator keys.** Each person who may send commands makes their own key, on their own computer:
 

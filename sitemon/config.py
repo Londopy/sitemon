@@ -201,6 +201,13 @@ RELAY_KEYS = {
 MESH = ipaddress.ip_network("10.0.0.0/8")  # AREDN's address range
 
 
+def is_mesh(addr: str) -> bool:
+    ip = ipaddress.ip_address(addr)
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip in MESH
+
+
 def _limit(d: dict[str, Any], key: str, default: str, where: str, transmitter: bool) -> float:
     v = _dur(d, key, default, where)
     if not 0 < v <= 86400:
@@ -221,11 +228,17 @@ def _control_hub(url: str) -> None:
 
     u = urlsplit(url)
     host = (u.hostname or "").rstrip(".")
+    if u.scheme not in ("http", "https") or not host:
+        raise ConfigError(f"[control] hubs: {url!r} must be an https URL")
     try:
-        on_mesh = ipaddress.ip_address(host) in MESH
+        on_mesh = is_mesh(host)
     except ValueError:
         # AREDN names end in .local.mesh, and the mesh completes bare names to them.
-        on_mesh = host.endswith(".mesh") or ("." not in host and host != "localhost")
+        on_mesh = (
+            host.endswith(".mesh")
+            or host.replace(".", "").isdigit()
+            or ("." not in host and host != "localhost")
+        )
     if on_mesh:
         raise ConfigError(
             f"[control] hubs: {url!r} may be on the AREDN mesh (a .mesh name, a bare name or a "

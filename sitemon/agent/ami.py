@@ -149,8 +149,8 @@ def parse_registered(text: str) -> bool:
 
 class AmiClient:
     """AMI over loopback, read-only. See the module docstring for the AMI user
-    this needs: ``write = reporting``, plus ``write = command`` only for the
-    optional registration check."""
+    this needs: ``write = reporting``, plus ``write = command`` for the optional
+    registration check and spoken alerts."""
 
     def __init__(
         self,
