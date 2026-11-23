@@ -59,6 +59,7 @@ Screen { background: ansi_default; }
 DataTable > .datatable--header { background: ansi_default; text-style: bold underline; }
 DataTable { height: auto; max-height: 24; margin: 0 1; }
 #sites { height: 1fr; max-height: 100%; }
+#charts { height: auto; }
 .chart { height: 1; margin: 0 1; }
 .chart .name { width: 24; }
 .chart Sparkline { width: 1fr; min-width: 10; }
@@ -257,7 +258,9 @@ class SitesScreen(Refreshing):
             table.add_columns(*cols)
         rows = []
         for group, s in sites:
-            alerts = sorted(s["alerts"], key=lambda a: a["severity"] != "critical")
+            alerts = sorted(
+                s["alerts"], key=lambda a: (a["rule"] != "silence", a["severity"] != "critical")
+            )
             cells = [
                 status_text(s["status"], self.app.dark),
                 s["name"],

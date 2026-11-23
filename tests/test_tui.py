@@ -105,6 +105,29 @@ async def test_sites_worst_first_then_a_site_page() -> None:
         await server.close()
 
 
+async def test_a_silent_site_leads_with_no_contact() -> None:
+    s1 = Site("s1")
+    hub = Hub(
+        make_hub_config({"s1": s1.key}, silence_warn=300, silence_critical=900),
+        db=HubDB(":memory:"),
+    )
+    now = time.time()
+    feed_at(hub, s1, "batt", {"v": 11.6}, now - 700)
+    feed_at(hub, s1, "batt", {"v": 11.5}, now - 640)
+    hub.evaluate("s1", now - 640)
+    hub.evaluate("s1", now + 400)
+    server, url = await serve(hub)
+    try:
+        app = HubApp(url)
+        async with app.run_test(size=(120, 40)) as pilot:
+            table = app.screen.query_one("#sites", DataTable)
+            await until(pilot, lambda: table.row_count == 1)
+            assert cells(table, 0)[0] == "NO CONTACT"
+            assert cells(table, 0)[-1].startswith("no contact")
+    finally:
+        await server.close()
+
+
 async def test_unreachable_hub_says_so() -> None:
     app = HubApp(f"http://127.0.0.1:{free_port()}")
     async with app.run_test() as pilot:
@@ -211,6 +234,23 @@ async def open_site(app: HubApp, pilot: Pilot[None], row: int = 0, rows: int = 2
     table = app.screen.query_one("#sites", DataTable)
     await until(pilot, lambda: table.row_count == rows)
     await pilot.press(*["down"] * row, "enter")
+
+
+async def test_every_chart_gets_a_line() -> None:
+    hub, _, s2 = two_sites()
+    feed_at(hub, s2, "env", {"temp_c": 24.0, "rh": 45.0}, time.time() - 60)
+    feed_at(hub, s2, "env", {"temp_c": 25.0, "rh": 46.0}, time.time() - 30)
+    server, url = await serve(hub)
+    try:
+        app = HubApp(url)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await open_site(app, pilot)
+            await until(pilot, lambda: len(app.screen.query(Sparkline)) >= 3)
+            await pilot.pause(0.2)
+            charts = app.screen.query_one("#charts")
+            assert charts.size.height == len(app.screen.query(Sparkline))
+    finally:
+        await server.close()
 
 
 async def test_text_from_a_site_is_shown_as_text() -> None:

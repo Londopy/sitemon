@@ -8,6 +8,11 @@ what appears on its GitHub release page. Validated in CI by
 
 ## [Unreleased]
 
+### Fixed
+
+- `sitemon tui` showed only the first chart on a site page in a smaller terminal.
+- `sitemon tui` led a silent site's problem column with an older alert instead of "no contact".
+
 ## [0.5.0] - 2026-11-23
 
 ### Added
