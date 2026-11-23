@@ -104,20 +104,16 @@ interval = "60s"
 # name = "radio"
 # pin = 5
 # mode = "pulse"                       # on for `pulse`, then off: power-cycles the radio
-# pulse = "10s"                        # up to a day; keep it short for anything powering a radio
+# pulse = "10s"                        # every relay is held to 170 s unless transmitter = false
 # active_low = true                    # most relay boards switch on a low pin
+# watchdog_pin = 23                    # optional: this relay's own cutoff, toggled while it's on
 
 # [[relays]]
 # name = "lights"
 # pin = 6
 # mode = "switch"                      # on and off on command, never on longer than max_on
+# transmitter = false                  # can't make the station transmit, so may stay on longer
 # max_on = "2h"
-
-# [[relays]]
-# name = "tx"
-# pin = 13
-# mode = "switch"
-# transmitter = true                   # can make the station transmit: held to 170 s
 
 # Spoken alerts on the repeater (deploy/README.md section 9). Needs [ami] and [control] hub_keys.
 # [announce]

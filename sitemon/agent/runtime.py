@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import html
+import socket
 import logging
 import math
 import os
@@ -13,15 +15,17 @@ import time
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 import aiohttp
 from aiohttp import web
+from aiohttp.abc import AbstractResolver, ResolveResult
 
 from .. import __version__
 from .._commands import Command
 from .._events import Event, PublicKey, SigningKey, canonical_json, envelope_body
 from .._systemd import notify, watchdog_interval
-from ..config import AgentConfig
+from ..config import AgentConfig, is_mesh
 from . import aredn
 from .ami import AmiClient, AmiError
 from .announce import AnnounceError, Announcer
@@ -72,6 +76,32 @@ def _ago(age_s: int | None) -> str:
 
 class SyncError(Exception):
     """An upload to one hub failed."""
+
+
+class NoMeshResolver(AbstractResolver):
+    """Drops AREDN mesh addresses from DNS answers for ``hosts`` (the control
+    hubs), so a name that resolves onto the mesh is never reached that way
+    (47 CFR 97.213). Other hosts resolve as usual."""
+
+    def __init__(self, hosts: set[str], inner: AbstractResolver | None = None) -> None:
+        self.hosts = hosts
+        self.inner = inner or aiohttp.DefaultResolver()
+
+    async def resolve(
+        self, host: str, port: int = 0, family: socket.AddressFamily = socket.AF_INET
+    ) -> list[ResolveResult]:
+        found = await self.inner.resolve(host, port, family)
+        if host.lower().rstrip(".") not in self.hosts:
+            return found
+        kept = [r for r in found if not is_mesh(r["host"])]
+        if not kept:
+            raise OSError(
+                errno.EHOSTUNREACH, f"{host} resolves only to AREDN mesh addresses (10.x)"
+            )
+        return kept
+
+    async def close(self) -> None:
+        await self.inner.close()
 
 
 def _acked_through(body: Any) -> int:
@@ -182,6 +212,11 @@ class Agent:
             if control and control.watchdog_pin is not None
             else None
         )
+        self.relay_watchdogs = {
+            r.name: KeepAlive(r.watchdog_pin, output)
+            for r in cfg.relays
+            if r.watchdog_pin is not None
+        }
         self.announcer = (
             Announcer(cfg.announce, self.ami, cfg.ami.node, self._sound_dir())
             if cfg.announce and self.ami is not None and cfg.ami is not None
@@ -293,8 +328,18 @@ class Agent:
         a slow sensor read can never hold a relay on past its limit."""
         if self.relays is not None and self.relays.tick():
             self._send_state("relay", self.relays.states())
-        if self.keepalive is not None and self._healthy():
+        if not self._healthy():
+            return
+        if self.keepalive is not None:
             self.keepalive.toggle()
+        if self.relays is not None:
+            # A relay's own watchdog only runs while that relay is meant to be on,
+            # so a pin stuck on by a driver bug still drops out.
+            for name, wd in self.relay_watchdogs.items():
+                if self.relays.relays[name].is_on:
+                    wd.toggle()
+                else:
+                    wd.rest()
 
     def _power_down(self, close: bool = False) -> None:
         """Switch every relay off (and with ``close``, release the pins)."""
@@ -303,6 +348,8 @@ class Agent:
             steps.append(self.relays.close if close else self.relays.off_all)
         if close and self.keepalive is not None:
             steps.append(self.keepalive.close)
+        if close:
+            steps += [wd.close for wd in self.relay_watchdogs.values()]
         for step in steps:
             try:
                 step()
@@ -320,7 +367,7 @@ class Agent:
         url = hub.url.rstrip("/") + "/api/commands/poll"
         try:
             async with self._http().post(
-                url, json=env, timeout=aiohttp.ClientTimeout(total=30)
+                url, json=env, timeout=aiohttp.ClientTimeout(total=30), allow_redirects=False
             ) as r:
                 if r.status != 200:
                     raise SyncError(f"HTTP {r.status} {(await r.text())[:200]}")
@@ -441,7 +488,11 @@ class Agent:
 
     def _http(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(headers={"User-Agent": f"sitemon/{__version__}"})
+            hosts = {(urlsplit(u).hostname or "").rstrip(".") for u in self.control_hubs}
+            self._session = aiohttp.ClientSession(
+                headers={"User-Agent": f"sitemon/{__version__}"},
+                connector=aiohttp.TCPConnector(resolver=NoMeshResolver(hosts)),
+            )
         return self._session
 
     async def sync_once(self, batch: int = 500) -> bool:

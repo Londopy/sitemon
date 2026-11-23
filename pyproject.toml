@@ -31,15 +31,17 @@ classifiers = [
 # once a year. aiohttp covers the hub server and every outgoing HTTP call;
 # cryptography is packaged by Debian (python3-cryptography).
 dependencies = [
-    "aiohttp>=3.9",
+    "aiohttp>=3.10",
     "cryptography>=41",
 ]
 
 [project.optional-dependencies]
 # Real hardware only. Without these the agent still runs with simulated sensors.
 pi = ["smbus2>=0.4", "gpiozero>=2.0"]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "hypothesis>=6", "ruff>=0.5", "mypy>=1.10"]
-all = ["sitemon[pi,dev]"]
+# The terminal dashboard, `sitemon tui`.
+tui = ["textual>=8.2,<9"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "hypothesis>=6", "ruff>=0.5", "mypy>=1.10", "textual>=8.2,<9"]
+all = ["sitemon[pi,tui,dev]"]
 
 [project.urls]
 Homepage = "https://github.com/Londopy/sitemon"

@@ -130,6 +130,11 @@ class KeepAlive:
         else:
             self.out.off()
 
+    def rest(self) -> None:
+        if self.level:
+            self.level = False
+            self.out.off()
+
     def close(self) -> None:
         try:
             self.out.off()

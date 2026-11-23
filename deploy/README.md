@@ -165,10 +165,22 @@ your own computer. Each relay has a mode and a time limit, and starts off:
   normally-closed contact, and a pulse cuts the power for that long. A doorbell is a short pulse.
 - `switch`: on and off on command, but never on longer than `max_on` (shack lights).
 
+Every relay is held to 170 s unless you mark it `transmitter = false`, so one you forgot to think
+about can't keep a station on the air; see Part 97 below. Shack lights and other things that
+can't make the station transmit get `transmitter = false`, and then up to a day.
+
 **Hardware cutoff.** Software limits aren't enough on their own: if the Pi hangs with a relay
-energised, it stays energised. Set `watchdog_pin` and the agent toggles it every second while it's
-healthy. One cutoff covers every relay output, because it switches the supply of the whole relay
-board:
+energised, it stays energised. There are two ways to wire a cutoff, and you can use both:
+
+- `[control] watchdog_pin`: one pin for the whole relay board. The agent toggles it every second
+  while it's healthy, and the circuit below switches the board's coil supply.
+- `watchdog_pin` on a `[[relays]]` entry: a pin of that relay's own. The agent toggles it only
+  while that relay is meant to be on and the agent is healthy, so the relay also drops out if its
+  GPIO pin is somehow left on. Build the same circuit per relay, switching only that relay's coil
+  (or gating its input). The relay energises on the first toggle, up to a second after the
+  command.
+
+The circuit, for the board-wide pin:
 
 - Watchdog pin into the rising-edge trigger input of a retriggerable monostable: half of a
   74HC123, run from 3.3 V, with the unused half's inputs and the reset tied to fixed levels. The
@@ -191,14 +203,20 @@ and measured as part of sitemon yet.
 control link must be wireline (internet, cellular) unless you run a proper auxiliary station on
 2 m or up (97.201). So:
 
-- List only hubs reached over the internet or cellular under `[control] hubs`, by https. sitemon
-  refuses plain http unless the hub is on the Pi itself, and refuses AREDN names
-  (`*.local.mesh`). It can't tell which path a bare name (which a mesh node may complete to
-  `.local.mesh`), a 10.x address or any other https address takes, though, so never list a hub
-  that the site reaches over the mesh.
-- Mark any relay that can make the station transmit with `transmitter = true`. Its `pulse` (or
-  `max_on` for a switch) is then held to 170 s, and `max_on` defaults to 2 minutes, inside the
-  3 minutes 97.213 allows after the control link fails. Keep the cutoff circuit in place too.
+- List only hubs reached over the internet or cellular under `[control] hubs`, by https and by
+  their full name. sitemon refuses plain http unless the hub is on the Pi itself, and refuses
+  anything that may be the mesh: `*.mesh` names, bare names (a mesh node completes them to
+  `.local.mesh`) and 10.x addresses, AREDN's range. The agent also never connects to a control
+  hub at a 10.x address, whatever its name resolves to, and command polls don't follow
+  redirects. A VPN that uses 10.x addresses can't carry commands for that reason. What sitemon
+  can't check is a hub on some other address that the site reaches over the mesh anyway,
+  through a tunnel or a gateway, so never list one.
+- 97.213 also asks that a station under remote control stop transmitting within 3 minutes if the
+  control link fails. sitemon can't see transmissions; what it does is switch every relay
+  (except those marked `transmitter = false`) off about 170 s at most after the command that
+  switched it on (the relay loop checks once a second), whether the hub, the link or the rest of
+  the agent is still working or not. So nothing a command started through a relay outlasts that,
+  with the cutoff circuit as the backstop if the Pi hangs. The repeater's own time-out timer still limits each transmission, as it always has.
 
 **Operator keys.** Each person who may send commands makes their own key, on their own computer:
 

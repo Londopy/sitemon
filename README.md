@@ -41,6 +41,9 @@ Dashboard: http://127.0.0.1:8470  (data in /tmp/sitemon-demo-1a2b; Ctrl+C to sto
 - **Dashboard:** a tile per site with sparklines, a plain-language status, a page per site with
   charts over 7 days to a year, alert and command history, and CSV export for every sensor.
   Weekly summary to Discord, including which way each battery's nightly low is heading.
+- **Terminal dashboard:** `sitemon tui` shows the same over SSH, without a browser: every site on
+  a hub, a site's readings, alerts and relays (with commands confirmed before they go), or the
+  agent's own health on the Pi you're logged in to.
 - **Built for transmitter sites:** I2C error recovery, chips re-initialised after RF-induced
   resets, systemd watchdog, batched writes to spare the SD card.
 
@@ -84,6 +87,28 @@ systemd units and a read-only root. Public hub deployments sit behind
 
 Each site also serves a small status page on `127.0.0.1:8471` for whoever is standing in the
 shack.
+
+### Terminal dashboard
+
+The terminal dashboard needs the `tui` extra (it adds [Textual](https://textual.textualize.io/)):
+
+```bash
+/opt/sitemon/bin/pip install "sitemon[pi,tui]"   # on a site Pi; "sitemon[tui]" elsewhere
+```
+
+On a site Pi, `sitemon tui` shows that agent's own health: its queue, each hub's backlog and last
+sync, sensor faults and the latest readings. Anywhere else, point it at a hub:
+
+```bash
+sitemon tui --hub http://hub.local.mesh:8470
+sitemon tui --hub https://sitemon.example.org --key ~/.config/sitemon/operator.key
+```
+
+Sites are listed worst first; Enter opens one, `d` changes the chart range, Esc goes back. With
+`--key`, pick a relay and press `p`, `o` or `f` to pulse it or switch it on or off. Each command
+asks for confirmation first, then waits for the site's answer. It uses the terminal's own colours,
+light or dark. Point it at the hub itself rather than through Anubis on an internet mirror,
+which may challenge it as it would a browser.
 
 ## Configuration
 
@@ -136,10 +161,14 @@ sitemon doesn't replace Allmon3; run both. It reads AMI the same way, read-only.
 - **Replace the repeater controller.** Relays power-cycle equipment and switch accessories; they
   don't key the transmitter or change its settings. Remote control has to come over a wireline
   path (internet, cellular) unless you run a proper auxiliary station (47 CFR 97.213). sitemon
-  refuses control hubs with AREDN names (`*.local.mesh`) and plain HTTP, but it can't see which
-  path a bare name, a 10.x address or any other https address takes, so listing only wireline
-  hubs is up to you. A relay marked `transmitter = true` is held to 170 s, inside the 3 minutes
-  97.213 sets for a failed control link.
+  refuses control hubs that may be on the mesh (`.mesh` and bare names, 10.x addresses) or on
+  plain HTTP. It never connects to a control hub at a 10.x address, whatever its name resolves
+  to, and command polls don't follow redirects. It can't see a tunnel or gateway onto the mesh
+  behind some other address, so listing only wireline hubs is still up to you. Every relay
+  switches off about 170 s at most after the command that switched it on (the relay loop checks
+  once a second), inside the 3 minutes 97.213 allows after a failed control link, unless it's
+  marked `transmitter = false` (shack lights). That limits what a command can start; timing each
+  transmission stays the repeater controller's job.
 - **Encrypt data over the mesh.** 47 CFR 97.113(a)(4) bars messages encoded to obscure their
   meaning, and the common reading is that this rules out encrypting terrestrial amateur traffic
   (an interpretation, not an FCC ruling). Everything is signed instead, so the hub can tell a real
@@ -195,6 +224,8 @@ sitemon/
   _events.py        # events, Ed25519 signing, upload envelope
   _commands.py      # signed commands: relays and spoken alerts
   config.py         # agent and hub TOML
+  client.py         # HTTP calls to a hub or an agent, for the CLI and the TUI
+  tui.py            # sitemon tui (Textual)
   agent/
     runtime.py      # sampling loops, heartbeat, sync, local status page
     store.py        # SQLite event queue, never-repeating sequence numbers

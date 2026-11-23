@@ -1,4 +1,4 @@
-"""Command line: ``sitemon keygen|pubkey|agent|hub|check|summary|command|demo``."""
+"""Command line: ``sitemon keygen|pubkey|agent|hub|check|summary|command|tui|demo``."""
 
 from __future__ import annotations
 
@@ -121,38 +121,42 @@ def cmd_check(a: argparse.Namespace) -> int:
     return 0
 
 
-async def _send_command(hub: str, cmd: Command, wait: float) -> tuple[str, str]:
-    """Queue ``cmd`` on the hub; with ``wait``, poll until the site reports back."""
-    import aiohttp
-
-    base = hub.rstrip("/")
-    timeout = aiohttp.ClientTimeout(total=30)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(f"{base}/api/commands", json=cmd.to_dict()) as r:
-            if r.status != 202:
-                return "refused by hub", (await r.text())[:300]
-        deadline = time.monotonic() + wait
-        while time.monotonic() < deadline:
-            await asyncio.sleep(3)
-            async with session.get(f"{base}/api/commands/{cmd.nonce}") as r:
-                st = await r.json() if r.status == 200 else {}
-            if st.get("status") in ("done", "refused", "expired"):
-                return str(st["status"]), str(st.get("detail", ""))
-    return "queued", "no answer from the site yet; it collects commands when it next syncs"
-
-
 def cmd_command(a: argparse.Namespace) -> int:
     args: dict[str, object] = {"relay": a.relay, "action": a.action}
     if a.seconds is not None:
         args["seconds"] = a.seconds
     cmd = Command.create(a.site, "relay", args).signed(SigningKey.load(a.key))
+
+    async def send() -> tuple[str, str]:
+        import aiohttp
+
+        from .client import send_command
+
+        async with aiohttp.ClientSession() as session:
+            return await send_command(session, a.hub, cmd, a.wait)
+
     try:
-        status, detail = asyncio.run(_send_command(a.hub, cmd, a.wait))
+        status, detail = asyncio.run(send())
     except OSError as e:
         print(f"cannot reach {a.hub}: {e}", file=sys.stderr)
         return 1
     print(f"{status}: {detail}" if detail else status)
     return 0 if status in ("done", "queued") else 1
+
+
+def cmd_tui(a: argparse.Namespace) -> int:
+    try:
+        from .tui import AgentApp, HubApp
+    except ImportError as e:
+        raise SystemExit(f"the TUI needs Textual: pip install 'sitemon[tui]' ({e})") from e
+    if a.hub is not None:
+        app: HubApp | AgentApp = HubApp(a.hub, SigningKey.load(a.key) if a.key else None)
+    elif a.key:
+        raise SystemExit("--key is for sending commands through a hub; add --hub")
+    else:
+        app = AgentApp(a.agent)
+    app.run()
+    return app.return_code or 0
 
 
 def cmd_summary(a: argparse.Namespace) -> int:
@@ -303,6 +307,11 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--key", required=True, help="your operator key (sitemon keygen)")
     s.add_argument("--wait", type=float, default=90, help="seconds to wait for the result")
     s.set_defaults(fn=cmd_command)
+    s = sub.add_parser("tui", help="terminal dashboard for a hub, or for the agent on this Pi")
+    s.add_argument("--hub", help="hub URL; without it, shows the agent on this machine")
+    s.add_argument("--agent", default="http://127.0.0.1:8471", help="the agent's local_ui address")
+    s.add_argument("--key", help="your operator key, to send relay commands (with --hub)")
+    s.set_defaults(fn=cmd_tui)
     s = sub.add_parser("demo", help="run a hub with three simulated sites on this machine")
     s.add_argument("--port", type=int, default=8470)
     s.add_argument("--ntfy-topic", help="also push demo alerts to this ntfy.sh topic")
