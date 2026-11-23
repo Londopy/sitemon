@@ -41,6 +41,9 @@ Dashboard: http://127.0.0.1:8470  (data in /tmp/sitemon-demo-1a2b; Ctrl+C to sto
 - **Dashboard:** a tile per site with sparklines, a plain-language status, a page per site with
   charts over 7 days to a year, alert and command history, and CSV export for every sensor.
   Weekly summary to Discord, including which way each battery's nightly low is heading.
+- **Terminal dashboard:** `sitemon tui` shows the same over SSH, without a browser: every site on
+  a hub, a site's readings, alerts and relays (with commands confirmed before they go), or the
+  agent's own health on the Pi you're logged in to.
 - **Built for transmitter sites:** I2C error recovery, chips re-initialised after RF-induced
   resets, systemd watchdog, batched writes to spare the SD card.
 
@@ -84,6 +87,28 @@ systemd units and a read-only root. Public hub deployments sit behind
 
 Each site also serves a small status page on `127.0.0.1:8471` for whoever is standing in the
 shack.
+
+### Terminal dashboard
+
+The terminal dashboard needs the `tui` extra (it adds [Textual](https://textual.textualize.io/)):
+
+```bash
+/opt/sitemon/bin/pip install "sitemon[pi,tui]"   # on a site Pi; "sitemon[tui]" elsewhere
+```
+
+On a site Pi, `sitemon tui` shows that agent's own health: its queue, each hub's backlog and last
+sync, sensor faults and the latest readings. Anywhere else, point it at a hub:
+
+```bash
+sitemon tui --hub http://hub.local.mesh:8470
+sitemon tui --hub https://sitemon.example.org --key ~/.config/sitemon/operator.key
+```
+
+Sites are listed worst first; Enter opens one, `d` changes the chart range, Esc goes back. With
+`--key`, pick a relay and press `p`, `o` or `f` to pulse it or switch it on or off. Each command
+asks for confirmation first, then waits for the site's answer. It uses the terminal's own colours,
+light or dark. Point it at the hub itself rather than through Anubis on an internet mirror,
+which may challenge it as it would a browser.
 
 ## Configuration
 
@@ -195,6 +220,8 @@ sitemon/
   _events.py        # events, Ed25519 signing, upload envelope
   _commands.py      # signed commands: relays and spoken alerts
   config.py         # agent and hub TOML
+  client.py         # HTTP calls to a hub or an agent, for the CLI and the TUI
+  tui.py            # sitemon tui (Textual)
   agent/
     runtime.py      # sampling loops, heartbeat, sync, local status page
     store.py        # SQLite event queue, never-repeating sequence numbers

@@ -8,6 +8,12 @@ what appears on its GitHub release page. Validated in CI by
 
 ## [Unreleased]
 
+### Added
+
+- `sitemon tui`, a terminal dashboard for checking things over SSH: every site on a hub with its
+  readings, sparklines, alerts and relays, relay commands confirmed before they go, or the agent's
+  own health on a site Pi. It needs the new `tui` extra (Textual).
+
 ## [0.4.0] - 2026-11-19
 
 ### Added
