@@ -121,33 +121,22 @@ def cmd_check(a: argparse.Namespace) -> int:
     return 0
 
 
-async def _send_command(hub: str, cmd: Command, wait: float) -> tuple[str, str]:
-    """Queue ``cmd`` on the hub; with ``wait``, poll until the site reports back."""
-    import aiohttp
-
-    base = hub.rstrip("/")
-    timeout = aiohttp.ClientTimeout(total=30)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(f"{base}/api/commands", json=cmd.to_dict()) as r:
-            if r.status != 202:
-                return "refused by hub", (await r.text())[:300]
-        deadline = time.monotonic() + wait
-        while time.monotonic() < deadline:
-            await asyncio.sleep(3)
-            async with session.get(f"{base}/api/commands/{cmd.nonce}") as r:
-                st = await r.json() if r.status == 200 else {}
-            if st.get("status") in ("done", "refused", "expired"):
-                return str(st["status"]), str(st.get("detail", ""))
-    return "queued", "no answer from the site yet; it collects commands when it next syncs"
-
-
 def cmd_command(a: argparse.Namespace) -> int:
     args: dict[str, object] = {"relay": a.relay, "action": a.action}
     if a.seconds is not None:
         args["seconds"] = a.seconds
     cmd = Command.create(a.site, "relay", args).signed(SigningKey.load(a.key))
+
+    async def send() -> tuple[str, str]:
+        import aiohttp
+
+        from .client import send_command
+
+        async with aiohttp.ClientSession() as session:
+            return await send_command(session, a.hub, cmd, a.wait)
+
     try:
-        status, detail = asyncio.run(_send_command(a.hub, cmd, a.wait))
+        status, detail = asyncio.run(send())
     except OSError as e:
         print(f"cannot reach {a.hub}: {e}", file=sys.stderr)
         return 1
